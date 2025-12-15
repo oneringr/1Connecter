@@ -469,7 +469,7 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                     AlertDialog(
                         onDismissRequest = { showAboutDialog = false },
                         title = { Text("关于") },
-                        text = { Text("1Connecter（医连接）\nSWMU校园网自动连接工具\n\n注意：本工具仅提供自动连接服务，不对您的信息来源负责！\n\nV1.1 Stable Version ORR\nMade By: OneRingR\nSpecially Thanks: Larry for work") },
+                        text = { Text("1Connecter（医连接）\nSWMU校园网自动连接工具\n\n注意：本工具仅提供自动连接服务，不对您的信息来源负责！\n\nV1.1 Stable Version\nMade By: OneRingR\nSpecially Thanks: Larry for work") },
                         confirmButton = {
                             TextButton(onClick = { showAboutDialog = false }) {
                                 Text("确定")
