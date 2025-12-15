@@ -37,6 +37,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -105,6 +106,7 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
     var showAboutDialog by remember { mutableStateOf(false) }
     var showCampusDialog by remember { mutableStateOf(false) }
     var showAccountManager by remember { mutableStateOf(false) }
+    var keepAliveMode by remember { mutableStateOf(false) }
 
     var campusUrl by remember { mutableStateOf("http://172.17.254.6/drcom/login") }
     var autoClose by remember { mutableStateOf(true) }
@@ -115,6 +117,7 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
     LaunchedEffect(Unit) {
         accounts = accountManager.loadAccounts()
         currentIndex = accountManager.loadCurrentIndex()
+        keepAliveMode = accountManager.loadKeepAlive()
         val savedUrl = accountManager.loadCampusUrl()
         if (savedUrl != null) {
             campusUrl = savedUrl
@@ -161,18 +164,30 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
             while (isRunning) {
                 val isConnected = networkManager.isConnected()
                 if (isConnected) {
-                    logs = logs + "[${getTime()}] ✅ 网络已连接!"
-                    showFireworks = true
-                    delay(3000)
-
-                    if (autoClose) {
-                        delay(1000)
-                        closeApp()
+                    if (keepAliveMode) {
+                        // 移除之前的日志重复检查，每次检测都输出日志
+                        logs = logs + "[${getTime()}] ✅ 网络正常，持续监测中..."
+                        showFireworks = true
+                        delay(30000) // 服务模式延迟，默认30000（30秒）
                     } else {
-                        logs = logs + "[${getTime()}] 自动关闭已取消，请手动退出"
+                        logs = logs + "[${getTime()}] ✅ 网络已连接🎉🎉🎉"
+                        showFireworks = true
+                        delay(3000) // 退出延迟，默认3000（3秒）
+
+                        if (autoClose) {
+                            delay(1000)
+                            closeApp()
+                        } else {
+                            logs = logs + "[${getTime()}] 自动关闭已取消，请手动退出"
+                        }
+                        isRunning = false
                     }
-                    isRunning = false
                 } else {
+                    if (keepAliveMode) {
+                        // 断线重连时也总是输出提示
+                        logs = logs + "[${getTime()}] ⚠️ 监测到网络断开，开始尝试重连..."
+                    }
+
                     if (currentIndex >= accounts.size) {
                         currentIndex = 0
                     }
@@ -235,6 +250,40 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                     style = MaterialTheme.typography.titleLarge
                 )
                 HorizontalDivider()
+                NavigationDrawerItem(
+                    label = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("服务模式")
+                            Switch(
+                                checked = keepAliveMode,
+                                onCheckedChange = { checked ->
+                                    keepAliveMode = checked
+                                    accountManager.saveKeepAlive(checked)
+                                    autoClose = false
+                                    logs =
+                                        logs + "[${getTime()}] 服务模式已更改，请手动重启程序以生效！"
+                                    if (checked && accounts.isNotEmpty()) {
+                                        isRunning = true
+                                    }
+                                }
+                            )
+                        }
+                    },
+                    selected = false,
+                    onClick = {
+                        val newValue = !keepAliveMode
+                        keepAliveMode = newValue
+                        accountManager.saveKeepAlive(newValue)
+                        autoClose = false
+                        if (newValue && accounts.isNotEmpty()) {
+                            isRunning = true
+                        }
+                    }
+                )
                 NavigationDrawerItem(
                     label = { Text("管理账号") },
                     selected = false,
@@ -393,11 +442,6 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                         modifier = Modifier.fillMaxSize(),
                         parties = listOf(party)
                     )
-                    Text(
-                        "🎉🎉🎉",
-                        modifier = Modifier.align(Alignment.Center),
-                        style = MaterialTheme.typography.displayLarge
-                    )
                 }
 
                 // Account Manager Dialog/Overlay
@@ -469,7 +513,7 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                     AlertDialog(
                         onDismissRequest = { showAboutDialog = false },
                         title = { Text("关于") },
-                        text = { Text("1Connecter（医连接）\nSWMU校园网自动连接工具\n\n注意：本工具仅提供自动连接服务，不对您的信息来源负责！\n\nV1.1 Stable Version\nMade By: OneRingR\nSpecially Thanks: Larry for work") },
+                        text = { Text("1Connecter（医连接）\nSWMU校园网自动连接工具\n\n注意：本工具仅提供自动连接服务，不对您的信息来源负责！\n\nV1.2 Beta Version\nMade By: OneRingR\nSpecially Thanks: Larry for work") },
                         confirmButton = {
                             TextButton(onClick = { showAboutDialog = false }) {
                                 Text("确定")
@@ -508,6 +552,6 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
 
 fun getTime(): String {
     val current = LocalDateTime.now()
-    val formatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+    val formatter = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss")
     return current.format(formatter)
 }

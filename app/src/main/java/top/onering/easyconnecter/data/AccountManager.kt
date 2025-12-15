@@ -14,6 +14,7 @@ class AccountManager(private val context: Context) {
     private val accountsFile = File(context.filesDir, "accounts.json")
     private val indexFile = File(context.filesDir, "current_index.txt")
     private val campusFile = File(context.filesDir, "campus_config.txt")
+    private val keepAliveFile = File(context.filesDir, "keep_alive_config.txt")
 
     fun hasAccounts(): Boolean {
         return accountsFile.exists() && accountsFile.length() > 0
@@ -56,6 +57,19 @@ class AccountManager(private val context: Context) {
             campusFile.readText().trim()
         } catch (e: Exception) {
             null
+        }
+    }
+
+    fun saveKeepAlive(enabled: Boolean) {
+        keepAliveFile.writeText(enabled.toString())
+    }
+
+    fun loadKeepAlive(): Boolean {
+        if (!keepAliveFile.exists()) return false
+        return try {
+            keepAliveFile.readText().trim().toBoolean()
+        } catch (e: Exception) {
+            false
         }
     }
 
