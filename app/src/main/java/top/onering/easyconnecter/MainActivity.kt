@@ -21,8 +21,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -37,6 +39,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -112,6 +115,7 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
     var autoClose by remember { mutableStateOf(true) }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val listState = rememberLazyListState()
 
     // Load accounts and config on startup
     LaunchedEffect(Unit) {
@@ -168,7 +172,7 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                         // 移除之前的日志重复检查，每次检测都输出日志
                         logs = logs + "[${getTime()}] ✅ 网络正常，持续监测中..."
                         showFireworks = true
-                        delay(30000) // 服务模式延迟，默认30000（30秒）
+                        delay(1000) // 服务模式延迟，默认30000（30秒）
                     } else {
                         logs = logs + "[${getTime()}] ✅ 网络已连接🎉🎉🎉"
                         showFireworks = true
@@ -411,18 +415,42 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                             "运行日志 - ${if (campusUrl.contains("172")) "城北" else "忠山"}",
                             style = MaterialTheme.typography.headlineSmall
                         )
-                        LazyColumn(
+                        Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxWidth()
-                                .padding(vertical = 8.dp)
                         ) {
-                            items(logs) { log ->
-                                Text(log, style = MaterialTheme.typography.bodySmall)
+                            LazyColumn(
+                                state = listState,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(vertical = 8.dp)
+                            ) {
+                                items(logs) { log ->
+                                    Text(log, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+
+                            if (logs.isNotEmpty()) {
+                                SmallFloatingActionButton(
+                                    onClick = {
+                                        scope.launch {
+                                            listState.animateScrollToItem(logs.lastIndex)
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(16.dp),
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "Scroll to bottom"
+                                    )
+                                }
                             }
                         }
-
-                        // Buttons removed as requested, moved to Drawer
                     }
                 }
 
