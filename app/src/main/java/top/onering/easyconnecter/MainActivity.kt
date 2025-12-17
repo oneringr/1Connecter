@@ -172,7 +172,7 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                         // 移除之前的日志重复检查，每次检测都输出日志
                         logs = logs + "[${getTime()}] ✅ 网络正常，持续监测中..."
                         showFireworks = true
-                        delay(1000) // 服务模式延迟，默认30000（30秒）
+                        delay(60000) // 服务模式延迟，默认60000（一分钟）
                     } else {
                         logs = logs + "[${getTime()}] ✅ 网络已连接🎉🎉🎉"
                         showFireworks = true
