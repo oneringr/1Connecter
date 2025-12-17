@@ -1,5 +1,6 @@
 package top.onering.easyconnecter
 
+import android.annotation.SuppressLint
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -74,6 +75,7 @@ import java.time.format.DateTimeFormatter
 import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
+    @SuppressLint("UnsafeIntentLaunch")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -293,7 +295,6 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
-                        showAccountManager = true
                         autoClose = false
                     }
                 )
@@ -302,7 +303,6 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
-                        showCampusDialog = true
                         autoClose = false
                     }
                 )
@@ -337,7 +337,6 @@ fun MainScreen(restartApp: () -> Unit, closeApp: () -> Unit) {
                     selected = false,
                     onClick = {
                         scope.launch { drawerState.close() }
-                        showAboutDialog = true
                         autoClose = false
                     }
                 )
