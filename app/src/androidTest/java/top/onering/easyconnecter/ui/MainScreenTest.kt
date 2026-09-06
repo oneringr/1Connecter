@@ -9,6 +9,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import top.onering.easyconnecter.MainUiState
@@ -20,6 +21,7 @@ class MainScreenTest {
 
     @Test
     fun drawerActionsOpenAccountCampusAndAboutDialogs() {
+        var csvExportRequests = 0
         composeRule.setContent {
             var state by remember {
                 mutableStateOf(
@@ -35,7 +37,9 @@ class MainScreenTest {
                 onSelectCampus = {},
                 onImportCsv = {},
                 onReimportCsv = {},
+                onExportCsv = { csvExportRequests++ },
                 onToggleKeepAlive = {},
+                onToggleAutoScroll = {},
                 onShowAccounts = { state = state.copy(showAccountManager = true) },
                 onDismissAccounts = { state = state.copy(showAccountManager = false) },
                 onDeleteAccount = {},
@@ -65,6 +69,10 @@ class MainScreenTest {
 
         openDrawerAndClick("注销校园网")
         composeRule.onNodeWithText("解绑并注销").assertIsDisplayed()
+        composeRule.onNodeWithText("取消").performClick()
+
+        openDrawerAndClick("导出配置 (CSV)")
+        assertEquals(1, csvExportRequests)
     }
 
     private fun openDrawerAndClick(label: String) {

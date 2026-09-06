@@ -28,7 +28,7 @@ class ConnectionCoordinator(
     private var lastLoginStartedAt = Long.MIN_VALUE
 
     suspend fun connectOnce(): ConnectionOutcome = operationMutex.withLock {
-        if (networkGateway.isInternetConnected()) {
+        if (hasInternetConnectivity()) {
             logRepository.add("✅ 网络正常")
             return@withLock ConnectionOutcome.Connected(null, null, alreadyConnected = true)
         }
@@ -46,6 +46,7 @@ class ConnectionCoordinator(
             listOf(preferredCarrier, preferredCarrier.alternate())
         }
 
+        var clientIpOnlineRecoveryUsed = false
         for (carrier in carriers) {
             var rateLimitRetried = false
             while (true) {
@@ -67,14 +68,34 @@ class ConnectionCoordinator(
                     }
 
                     is LoginOutcome.InvalidCredentials -> {
-                        logRepository.add("❌ 账号或密码错误，删除账号: ${account.displayLabel()}")
+                        logRepository.add("❌ ${outcome.message}，删除账号: ${account.displayLabel()}")
                         removeAccountLocked(index, account)
                         return@withLock ConnectionOutcome.AccountRemoved(account)
                     }
 
                     is LoginOutcome.OperatorNotBound -> {
-                        logRepository.add("⚠️ ${outcome.message}，尝试其他运营商")
-                        break
+                        logRepository.add("❌ ${outcome.message}，删除账号: ${account.displayLabel()}")
+                        removeAccountLocked(index, account)
+                        return@withLock ConnectionOutcome.AccountRemoved(account)
+                    }
+
+                    is LoginOutcome.ClientIpOnline -> {
+                        if (clientIpOnlineRecoveryUsed) {
+                            logRepository.add("⚠️ clientip online 重试后仍存在，本轮不再重复注销")
+                            break
+                        }
+                        clientIpOnlineRecoveryUsed = true
+                        logRepository.add("⚠️ 检测到 clientip online，注销当前会话后重试${carrier.displayName}")
+                        val logoutResult = networkGateway.logout(configRepository.campus.value)
+                        if (logoutResult.isSuccess) {
+                            logRepository.add("已请求注销当前校园网会话")
+                        } else {
+                            logRepository.add(
+                                "⚠️ 校园网注销请求失败: " +
+                                    (logoutResult.exceptionOrNull()?.message ?: "未知错误") +
+                                    "，仍重试当前登录"
+                            )
+                        }
                     }
 
                     is LoginOutcome.RateLimited -> {
@@ -237,6 +258,13 @@ class ConnectionCoordinator(
         if (elapsed < MIN_LOGIN_INTERVAL_MILLIS) sleep(MIN_LOGIN_INTERVAL_MILLIS - elapsed)
     }
 
+    private suspend fun hasInternetConnectivity(): Boolean {
+        repeat(CONNECTIVITY_PROBE_ATTEMPTS) {
+            if (networkGateway.isInternetConnected()) return true
+        }
+        return false
+    }
+
     internal fun ipv4ToDecimal(ipv4: String): String? {
         val octets = ipv4.split('.').map { it.toIntOrNull() ?: return null }
         if (octets.size != 4 || octets.any { it !in 0..255 }) return null
@@ -254,6 +282,7 @@ class ConnectionCoordinator(
         const val MIN_LOGIN_INTERVAL_SECONDS = 3
         const val MIN_LOGIN_INTERVAL_MILLIS = MIN_LOGIN_INTERVAL_SECONDS * 1_000L
         const val KEEP_ALIVE_INTERVAL_MILLIS = 60_000L
+        const val CONNECTIVITY_PROBE_ATTEMPTS = 5
         const val STATUS_CONFIRM_ATTEMPTS = 3
         const val STATUS_CONFIRM_DELAY_MILLIS = 1_000L
     }

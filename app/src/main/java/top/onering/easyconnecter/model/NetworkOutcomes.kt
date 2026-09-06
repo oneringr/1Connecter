@@ -10,6 +10,7 @@ sealed interface LoginOutcome {
 
     data class InvalidCredentials(override val message: String) : LoginOutcome
     data class OperatorNotBound(override val message: String) : LoginOutcome
+    data class ClientIpOnline(override val message: String) : LoginOutcome
 
     data class RateLimited(
         val waitSeconds: Int,

@@ -4,7 +4,6 @@ import android.app.Application
 import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -15,13 +14,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import top.onering.easyconnecter.data.RuntimeStatus
 import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.ConnectionOutcome
 import top.onering.easyconnecter.service.KeepAliveService
-import java.io.File
 
 data class MainUiState(
     val accounts: List<Account> = emptyList(),
@@ -29,6 +26,7 @@ data class MainUiState(
     val currentIndex: Int = 0,
     val campus: Campus = Campus.CHENGBEI,
     val keepAlive: Boolean = false,
+    val autoScrollLogs: Boolean = true,
     val runtimeStatus: RuntimeStatus = RuntimeStatus(),
     val showAccountManager: Boolean = false,
     val showCampusDialog: Boolean = false,
@@ -91,6 +89,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setAutoScrollLogs(enabled: Boolean) {
+        autoClose = false
+        _uiState.update { it.copy(autoScrollLogs = enabled) }
+    }
+
     fun selectInitialCampus(campus: Campus) {
         viewModelScope.launch { container.coordinator.changeCampus(campus) }
     }
@@ -141,21 +144,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun exportLogs() {
         autoClose = false
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val file = File(getApplication<Application>().getExternalFilesDir(null), "connect_logs.txt")
-                    file.writeText(container.logs.snapshot().joinToString("\n"))
-                    file.absolutePath
-                }
-            }
+            val result = container.logExporter.export(container.logs.snapshot())
             _events.emit(
                 MainUiEvent.Toast(
                     result.fold(
-                        onSuccess = { "日志已保存至 $it" },
+                        onSuccess = { "日志已保存至 ${it.displayPath}" },
                         onFailure = { "日志导出失败: ${it.message ?: "未知错误"}" }
                     )
                 )
             )
+        }
+    }
+
+    fun exportCsv(uri: Uri) {
+        autoClose = false
+        viewModelScope.launch {
+            _uiState.update { it.copy(isBusy = true) }
+            val result = runCatching {
+                val outputStream = requireNotNull(
+                    getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
+                ) { "无法打开保存位置" }
+                outputStream.use { container.accounts.exportCsv(it) }
+            }
+            _events.emit(
+                MainUiEvent.Toast(
+                    result.fold(
+                        onSuccess = { "已导出 $it 个账号" },
+                        onFailure = { "CSV 导出失败: ${it.message ?: "未知错误"}" }
+                    )
+                )
+            )
+            _uiState.update { it.copy(isBusy = false) }
         }
     }
 
@@ -208,11 +227,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (normalModeJob?.isActive == true || container.accounts.accounts.value.isEmpty()) return
         normalModeJob = viewModelScope.launch {
             while (!container.config.keepAlive.value && container.accounts.accounts.value.isNotEmpty()) {
-                when (container.coordinator.connectOnce()) {
+                when (val outcome = container.coordinator.connectOnce()) {
                     is ConnectionOutcome.Connected -> {
+                        if (outcome.alreadyConnected) {
+                            container.logs.add("检测到网络已连接，应用保持打开")
+                            return@launch
+                        }
                         _uiState.update { it.copy(showFireworks = true) }
                         delay(3_000)
-                        if (autoClose) {
+                        if (shouldAutoCloseAfterConnection(outcome, autoClose)) {
                             _events.emit(MainUiEvent.CloseApp)
                         } else {
                             container.logs.add("自动关闭已取消，请手动退出")
@@ -254,3 +277,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 }
+
+internal fun shouldAutoCloseAfterConnection(
+    outcome: ConnectionOutcome,
+    autoCloseEnabled: Boolean
+): Boolean = autoCloseEnabled &&
+    outcome is ConnectionOutcome.Connected &&
+    !outcome.alreadyConnected

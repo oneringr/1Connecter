@@ -27,7 +27,7 @@ class DrcomClientTest {
             endpointProvider = CampusEndpointProvider {
                 CampusEndpoints(server.url("/"), server.url("/"))
             },
-            connectivityUrl = server.url("/connectivity")
+            connectivityProbe = ConnectivityProbe { false }
         )
     }
 
@@ -58,7 +58,7 @@ class DrcomClientTest {
     }
 
     @Test
-    fun parsesKnownJsonpOutcomesWithoutConfusingBindError() {
+    fun parsesAccountErrorsThatMustRemoveTheAccount() {
         val invalid = client.parseLoginResponse(
             "dr1003({\"result\":0,\"msga\":\"userid error\"})",
             Carrier.MOBILE
@@ -67,14 +67,52 @@ class DrcomClientTest {
             "dr1003({\"result\":0,\"msga\":\"bind userid error\"})",
             Carrier.TELECOM
         )
-        val limited = client.parseLoginResponse(
-            "dr1003({\"result\":0,\"msga\":\"error5 waitsec <3\"})",
+        val invalid2 = client.parseLoginResponse(
+            "dr1003({\"result\":0,\"msga\":\"userid error2\"})",
+            Carrier.MOBILE
+        )
+        val operatorPassword = client.parseLoginResponse(
+            "dr1003({\"result\":0,\"msga\":\"Oppp error\"})",
             Carrier.TELECOM
         )
 
         assertTrue(invalid is LoginOutcome.InvalidCredentials)
         assertTrue(unbound is LoginOutcome.OperatorNotBound)
+        assertTrue(invalid2 is LoginOutcome.InvalidCredentials)
+        assertTrue(operatorPassword is LoginOutcome.InvalidCredentials)
+    }
+
+    @Test
+    fun parsesRetryableKnownJsonpOutcomes() {
+        val limited = client.parseLoginResponse(
+            "dr1003({\"result\":0,\"msga\":\"error5 waitsec <3\"})",
+            Carrier.TELECOM
+        )
+        val clientIpOnline = client.parseLoginResponse(
+            "dr1003({\"result\":0,\"msga\":\"clientip online\"})",
+            Carrier.MOBILE
+        )
+
         assertEquals(3, (limited as LoginOutcome.RateLimited).waitSeconds)
+        assertTrue(clientIpOnline is LoginOutcome.ClientIpOnline)
+    }
+
+    @Test
+    fun delegatesConnectivityCheckToPingProbe() = runTest {
+        var probeCalls = 0
+        val probeClient = DrcomClient(
+            client = OkHttpClient(),
+            endpointProvider = CampusEndpointProvider {
+                CampusEndpoints(server.url("/"), server.url("/"))
+            },
+            connectivityProbe = ConnectivityProbe {
+                probeCalls++
+                true
+            }
+        )
+
+        assertTrue(probeClient.isInternetConnected())
+        assertEquals(1, probeCalls)
     }
 
     @Test

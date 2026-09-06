@@ -4,7 +4,6 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.CacheControl
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -26,6 +25,29 @@ fun interface CampusEndpointProvider {
     fun endpoints(campus: Campus): CampusEndpoints
 }
 
+fun interface ConnectivityProbe {
+    suspend fun ping(): Boolean
+}
+
+private class SystemPingConnectivityProbe(
+    private val host: String = "baidu.com"
+) : ConnectivityProbe {
+    override suspend fun ping(): Boolean = withContext(Dispatchers.IO) {
+        var process: Process? = null
+        try {
+            process = ProcessBuilder("/system/bin/ping", "-c", "1", "-W", "2", host)
+                .redirectErrorStream(true)
+                .start()
+            process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0
+        } catch (_: Exception) {
+            false
+        } finally {
+            runCatching { process?.inputStream?.close() }
+            if (process?.isAlive == true) process.destroy()
+        }
+    }
+}
+
 interface NetworkGateway {
     suspend fun isInternetConnected(): Boolean
     suspend fun login(studentId: String, password: String, campus: Campus, carrier: Carrier): LoginOutcome
@@ -42,21 +64,11 @@ class DrcomClient(
             portalBase = "http://${campus.host}:801/".toHttpUrl()
         )
     },
-    private val connectivityUrl: HttpUrl = "https://www.baidu.com/".toHttpUrl()
+    private val connectivityProbe: ConnectivityProbe = SystemPingConnectivityProbe()
 ) : NetworkGateway {
     private val gson = Gson()
 
-    override suspend fun isInternetConnected(): Boolean = withContext(Dispatchers.IO) {
-        val request = Request.Builder()
-            .url(connectivityUrl)
-            .cacheControl(CacheControl.FORCE_NETWORK)
-            .build()
-        try {
-            client.newCall(request).execute().use { it.isSuccessful }
-        } catch (_: Exception) {
-            false
-        }
-    }
+    override suspend fun isInternetConnected(): Boolean = connectivityProbe.ping()
 
     override suspend fun login(
         studentId: String,
@@ -163,8 +175,12 @@ class DrcomClient(
             ?: "服务端未提供失败原因"
         val normalized = serverMessage.trim().lowercase()
         return when {
-            normalized == "userid error" -> LoginOutcome.InvalidCredentials("账号或密码错误")
+            normalized == "userid error" || normalized == "userid error2" ->
+                LoginOutcome.InvalidCredentials("校园网账号或密码错误")
             normalized == "bind userid error" -> LoginOutcome.OperatorNotBound("未绑定${carrier.displayName}运营商账号")
+            normalized == "oppp error" ->
+                LoginOutcome.InvalidCredentials("绑定的${carrier.displayName}运营商账号密码错误")
+            normalized == "clientip online" -> LoginOutcome.ClientIpOnline(serverMessage)
             RATE_LIMIT_REGEX.matches(normalized) -> {
                 val waitSeconds = RATE_LIMIT_REGEX.matchEntire(normalized)
                     ?.groupValues?.getOrNull(1)?.toIntOrNull()?.coerceAtLeast(MIN_LOGIN_INTERVAL_SECONDS)

@@ -6,6 +6,7 @@ import top.onering.easyconnecter.data.AccountRepository
 import top.onering.easyconnecter.data.ConfigRepository
 import top.onering.easyconnecter.data.LogRepository
 import top.onering.easyconnecter.data.RuntimeRepository
+import top.onering.easyconnecter.data.SharedLogExporter
 import top.onering.easyconnecter.domain.ConnectionCoordinator
 import top.onering.easyconnecter.network.DrcomClient
 
@@ -23,6 +24,7 @@ class AppContainer(context: Context) {
     val accounts = AccountRepository(context)
     val config = ConfigRepository(context)
     val logs = LogRepository()
+    val logExporter = SharedLogExporter(context)
     val runtime = RuntimeRepository()
     val network = DrcomClient()
     val coordinator = ConnectionCoordinator(accounts, config, logs, network)

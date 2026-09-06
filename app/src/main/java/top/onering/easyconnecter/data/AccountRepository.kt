@@ -14,6 +14,7 @@ import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.CsvImportResult
 import java.io.File
 import java.io.InputStream
+import java.io.OutputStream
 
 class AccountRepository(context: Context) : AccountStore {
     private val gson = Gson()
@@ -26,6 +27,12 @@ class AccountRepository(context: Context) : AccountStore {
 
     suspend fun importCsv(inputStream: InputStream): CsvImportResult = withContext(Dispatchers.IO) {
         parser.parse(inputStream)
+    }
+
+    suspend fun exportCsv(outputStream: OutputStream): Int = withContext(Dispatchers.IO) {
+        val snapshot = accounts.value
+        parser.write(snapshot, outputStream)
+        snapshot.size
     }
 
     override suspend fun replace(accounts: List<Account>) = mutex.withLock {

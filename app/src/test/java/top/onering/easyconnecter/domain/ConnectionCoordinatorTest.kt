@@ -25,7 +25,7 @@ class ConnectionCoordinatorTest {
         val config = FakeConfigStore()
         val gateway = FakeNetworkGateway(
             loginOutcomes = mutableListOf(
-                LoginOutcome.OperatorNotBound("未绑定移动"),
+                LoginOutcome.ProtocolError("移动登录失败"),
                 LoginOutcome.Success(Carrier.TELECOM)
             )
         )
@@ -42,20 +42,25 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun deletesOnlyExplicitInvalidCredentialAccount() = runTest {
-        val accounts = FakeAccountStore(listOf(account("bad")))
-        val config = FakeConfigStore()
-        val gateway = FakeNetworkGateway(
-            loginOutcomes = mutableListOf(LoginOutcome.InvalidCredentials("账号或密码错误"))
+    fun deletesEveryConfiguredRejectedAccountOutcome() = runTest {
+        val rejectedOutcomes = listOf(
+            LoginOutcome.InvalidCredentials("校园网账号或密码错误"),
+            LoginOutcome.OperatorNotBound("未绑定移动运营商账号"),
+            LoginOutcome.InvalidCredentials("绑定的电信运营商账号密码错误")
         )
-        val coordinator = coordinator(accounts, config, gateway)
 
-        val outcome = coordinator.connectOnce()
+        rejectedOutcomes.forEach { rejectedOutcome ->
+            val accounts = FakeAccountStore(listOf(account("bad")))
+            val config = FakeConfigStore()
+            val gateway = FakeNetworkGateway(loginOutcomes = mutableListOf(rejectedOutcome))
 
-        assertTrue(outcome is ConnectionOutcome.AccountRemoved)
-        assertTrue(accounts.accounts.value.isEmpty())
-        assertEquals(1, gateway.loginCarriers.size)
-        assertEquals(0, config.currentIndex.value)
+            val outcome = coordinator(accounts, config, gateway).connectOnce()
+
+            assertTrue(outcome is ConnectionOutcome.AccountRemoved)
+            assertTrue(accounts.accounts.value.isEmpty())
+            assertEquals(1, gateway.loginCarriers.size)
+            assertEquals(0, config.currentIndex.value)
+        }
     }
 
     @Test
@@ -92,6 +97,74 @@ class ConnectionCoordinatorTest {
         coordinator(accounts, config, gateway).connectOnce()
 
         assertEquals(listOf(Carrier.TELECOM), gateway.loginCarriers)
+    }
+
+    @Test
+    fun checksConnectivityUpToFiveTimesAndStopsAtFirstSuccess() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one")))
+        val config = FakeConfigStore()
+        val gateway = FakeNetworkGateway(
+            connectivityResults = mutableListOf(false, false, true)
+        )
+
+        val outcome = coordinator(accounts, config, gateway).connectOnce()
+
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertTrue((outcome as ConnectionOutcome.Connected).alreadyConnected)
+        assertEquals(3, gateway.connectivityChecks)
+        assertTrue(gateway.loginCarriers.isEmpty())
+    }
+
+    @Test
+    fun checksConnectivityFiveTimesBeforeStartingLogin() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one")))
+        val config = FakeConfigStore()
+        val gateway = FakeNetworkGateway(
+            connectivityResults = MutableList(5) { false },
+            loginOutcomes = mutableListOf(LoginOutcome.Success(Carrier.MOBILE))
+        )
+
+        val outcome = coordinator(accounts, config, gateway).connectOnce()
+
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertEquals(5, gateway.connectivityChecks)
+        assertEquals(listOf(Carrier.MOBILE), gateway.loginCarriers)
+    }
+
+    @Test
+    fun logsOutOnceAndRetriesSameLoginForClientIpOnline() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one")))
+        val config = FakeConfigStore()
+        val gateway = FakeNetworkGateway(
+            loginOutcomes = mutableListOf(
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.Success(Carrier.MOBILE)
+            )
+        )
+
+        val outcome = coordinator(accounts, config, gateway).connectOnce()
+
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE), gateway.loginCarriers)
+        assertEquals(1, gateway.logoutCalls)
+    }
+
+    @Test
+    fun clientIpOnlineRecoveryDoesNotLoopLogout() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one")))
+        val config = FakeConfigStore()
+        val gateway = FakeNetworkGateway(
+            loginOutcomes = mutableListOf(
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.ClientIpOnline("clientip online")
+            )
+        )
+
+        coordinator(accounts, config, gateway).connectOnce()
+
+        assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE, Carrier.TELECOM), gateway.loginCarriers)
+        assertEquals(1, gateway.logoutCalls)
     }
 
     @Test
@@ -204,14 +277,20 @@ class ConnectionCoordinatorTest {
     private class FakeNetworkGateway(
         private val loginOutcomes: MutableList<LoginOutcome> = mutableListOf(),
         private val statuses: MutableList<Result<SessionStatus>> = mutableListOf(),
-        private val unbindResult: Result<Unit> = Result.success(Unit)
+        private val unbindResult: Result<Unit> = Result.success(Unit),
+        private val connectivityResults: MutableList<Boolean> = mutableListOf()
     ) : NetworkGateway {
         val loginCarriers = mutableListOf<Carrier>()
         val calls = mutableListOf<String>()
         var unboundMac: String? = null
         var unboundIp: String? = null
+        var connectivityChecks = 0
+        var logoutCalls = 0
 
-        override suspend fun isInternetConnected(): Boolean = false
+        override suspend fun isInternetConnected(): Boolean {
+            connectivityChecks++
+            return if (connectivityResults.isEmpty()) false else connectivityResults.removeAt(0)
+        }
 
         override suspend fun login(
             studentId: String,
@@ -242,6 +321,7 @@ class ConnectionCoordinatorTest {
 
         override suspend fun logout(campus: Campus): Result<Unit> {
             calls += "logout"
+            logoutCalls++
             return Result.success(Unit)
         }
     }

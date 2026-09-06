@@ -1,10 +1,13 @@
 package top.onering.easyconnecter.data
 
 import org.apache.commons.csv.CSVFormat
+import org.apache.commons.csv.DuplicateHeaderMode
 import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.CsvImportResult
 import top.onering.easyconnecter.model.CsvImportWarning
 import java.io.InputStream
+import java.io.OutputStream
+import java.io.OutputStreamWriter
 import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.CodingErrorAction
@@ -27,6 +30,8 @@ class CsvAccountParser {
             .setSkipHeaderRecord(true)
             .setIgnoreEmptyLines(true)
             .setTrim(true)
+            .setAllowMissingColumnNames(true)
+            .setDuplicateHeaderMode(DuplicateHeaderMode.ALLOW_ALL)
             .get()
 
         return try {
@@ -77,6 +82,28 @@ class CsvAccountParser {
         }
     }
 
+    fun write(accounts: List<Account>, outputStream: OutputStream) {
+        val format = CSVFormat.DEFAULT.builder()
+            .setHeader(*EXPORT_HEADERS.toTypedArray())
+            .setRecordSeparator("\r\n")
+            .get()
+
+        OutputStreamWriter(outputStream, StandardCharsets.UTF_8).use { writer ->
+            writer.write('\uFEFF'.code)
+            format.print(writer).use { printer ->
+                accounts.forEach { account ->
+                    printer.printRecord(
+                        account.studentId,
+                        account.name,
+                        account.idCard,
+                        account.className,
+                        account.phone
+                    )
+                }
+            }
+        }
+    }
+
     private fun decode(bytes: ByteArray): String {
         val utf8Bytes = if (bytes.size >= 3 &&
             bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()
@@ -99,5 +126,6 @@ class CsvAccountParser {
 
     private companion object {
         val REQUIRED_HEADERS = listOf("学号", "身份证号")
+        val EXPORT_HEADERS = listOf("学号", "姓名", "身份证号", "班级", "联系电话")
     }
 }

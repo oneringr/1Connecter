@@ -34,6 +34,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
@@ -55,7 +56,9 @@ fun MainScreen(
     onSelectCampus: (Campus) -> Unit,
     onImportCsv: () -> Unit,
     onReimportCsv: () -> Unit,
+    onExportCsv: () -> Unit,
     onToggleKeepAlive: (Boolean) -> Unit,
+    onToggleAutoScroll: (Boolean) -> Unit,
     onShowAccounts: () -> Unit,
     onDismissAccounts: () -> Unit,
     onDeleteAccount: (Int) -> Unit,
@@ -120,6 +123,11 @@ fun MainScreen(
                     onClick = { closeDrawerThen(onReimportCsv) }
                 )
                 NavigationDrawerItem(
+                    label = { Text("导出配置 (CSV)") },
+                    selected = false,
+                    onClick = { closeDrawerThen(onExportCsv) }
+                )
+                NavigationDrawerItem(
                     label = { Text("导出日志") },
                     selected = false,
                     onClick = { closeDrawerThen(onExportLogs) }
@@ -161,6 +169,17 @@ fun MainScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             style = MaterialTheme.typography.bodySmall
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("自动滚动到最新", style = MaterialTheme.typography.bodyMedium)
+                            Switch(
+                                checked = state.autoScrollLogs,
+                                onCheckedChange = onToggleAutoScroll
+                            )
+                        }
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             LazyColumn(
                                 state = listState,
@@ -168,6 +187,11 @@ fun MainScreen(
                             ) {
                                 items(state.logs) { log ->
                                     Text(log, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                            LaunchedEffect(state.logs.size, state.autoScrollLogs) {
+                                if (state.autoScrollLogs && state.logs.isNotEmpty()) {
+                                    listState.animateScrollToItem(state.logs.lastIndex)
                                 }
                             }
                             if (state.logs.isNotEmpty()) {

@@ -31,6 +31,10 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.GetContent()
                 ) { uri -> uri?.let(viewModel::importCsv) }
 
+                val csvExportLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument("text/csv")
+                ) { uri -> uri?.let(viewModel::exportCsv) }
+
                 val notificationPermissionLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission()
                 ) { granted ->
@@ -39,6 +43,20 @@ class MainActivity : ComponentActivity() {
                         Toast.makeText(
                             this,
                             "通知权限未授予；保活仍会运行，可在系统任务管理器中查看",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+
+                val storagePermissionLauncher = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission()
+                ) { granted ->
+                    if (granted) {
+                        viewModel.exportLogs()
+                    } else {
+                        Toast.makeText(
+                            this,
+                            "未授予存储权限，无法导出日志",
                             Toast.LENGTH_LONG
                         ).show()
                     }
@@ -65,6 +83,10 @@ class MainActivity : ComponentActivity() {
                         viewModel.markUserInteraction()
                         csvLauncher.launch("text/*")
                     },
+                    onExportCsv = {
+                        viewModel.markUserInteraction()
+                        csvExportLauncher.launch("1Connecter_accounts.csv")
+                    },
                     onToggleKeepAlive = { enabled ->
                         viewModel.markUserInteraction()
                         val needsPermission = enabled &&
@@ -79,6 +101,7 @@ class MainActivity : ComponentActivity() {
                             viewModel.setKeepAlive(enabled)
                         }
                     },
+                    onToggleAutoScroll = viewModel::setAutoScrollLogs,
                     onShowAccounts = viewModel::showAccountManager,
                     onDismissAccounts = viewModel::dismissAccountManager,
                     onDeleteAccount = viewModel::deleteAccount,
@@ -90,7 +113,19 @@ class MainActivity : ComponentActivity() {
                     onShowLogout = viewModel::showLogoutDialog,
                     onDismissLogout = viewModel::dismissLogoutDialog,
                     onConfirmLogout = viewModel::confirmLogout,
-                    onExportLogs = viewModel::exportLogs
+                    onExportLogs = {
+                        viewModel.markUserInteraction()
+                        val needsPermission = Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+                            ContextCompat.checkSelfPermission(
+                                this,
+                                Manifest.permission.WRITE_EXTERNAL_STORAGE
+                            ) != PackageManager.PERMISSION_GRANTED
+                        if (needsPermission) {
+                            storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                        } else {
+                            viewModel.exportLogs()
+                        }
+                    }
                 )
             }
         }

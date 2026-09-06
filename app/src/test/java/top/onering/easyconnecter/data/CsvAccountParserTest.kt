@@ -5,6 +5,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 
@@ -37,6 +38,39 @@ class CsvAccountParserTest {
         assertNull(result.fatalError)
         assertEquals("李四", result.accounts.single().name)
         assertEquals("011234", result.accounts.single().password)
+    }
+
+    @Test
+    fun acceptsTrailingEmptyHeaderColumnsFromExistingExports() {
+        val result = parser.parseContent(
+            "学号,姓名,身份证号,班级,联系电话,,,,\n" +
+                "20230004,测试账号,510000200001011234,一班,13800000000,,,,\n"
+        )
+
+        assertNull(result.fatalError)
+        assertEquals(1, result.accounts.size)
+        assertEquals("20230004", result.accounts.single().studentId)
+    }
+
+    @Test
+    fun exportedCsvIsUtf8BomAndCanBeImportedAgain() {
+        val account = top.onering.easyconnecter.model.Account(
+            studentId = "20230005",
+            password = "011234",
+            name = "测试,账号",
+            className = "临床\n二班",
+            phone = "",
+            idCard = "510000200001011234"
+        )
+        val output = ByteArrayOutputStream()
+
+        parser.write(listOf(account), output)
+        val bytes = output.toByteArray()
+        val result = parser.parse(ByteArrayInputStream(bytes))
+
+        assertTrue(bytes.take(3) == listOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()))
+        assertNull(result.fatalError)
+        assertEquals(listOf(account), result.accounts)
     }
 
     @Test
