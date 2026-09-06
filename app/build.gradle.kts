@@ -12,8 +12,8 @@ android {
         applicationId = "top.onering.easyconnecter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 102
-        versionName = "1.2"
+        versionCode = 103
+        versionName = "1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -53,8 +53,11 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.konfetti.compose)
+    implementation(libs.commons.csv)
 
     testImplementation(libs.junit)
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

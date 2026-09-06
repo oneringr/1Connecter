@@ -11,8 +11,10 @@
 
 - 支持导入 CSV 账号配置（需要您自行提供）
 - 支持多账号顺序轮换登录
+- 支持自动轮试移动（`R3=1`）和电信（`R3=2`），并记住账号上次成功的运营商
 - 支持检测网络状态后自动发起登录
-- 支持保活模式，断线后持续重连
+- 支持前台服务保活，关闭界面后仍可持续监测和重连
+- 支持解绑 MAC、注销校园网会话并确认注销状态
 - 支持切换校区登录地址
 - 支持导出运行日志
 - 使用本地文件持久化保存账号、当前索引和运行配置
@@ -26,6 +28,7 @@
 - Kotlin Coroutines
 - OkHttp
 - Gson
+- Apache Commons CSV
 - Konfetti
 
 ## 环境要求
@@ -73,15 +76,18 @@ macOS / Linux:
 1. 启动应用
 2. 选择校区
 3. 导入账号 CSV 文件
-4. 应用开始检测网络并尝试登录
+4. 应用开始检测网络，并依次尝试移动和电信线路
 
 ### 保活模式
 
-开启后，应用会持续检测网络状态：
+开启后，应用会启动带常驻通知的前台服务持续检测网络状态：
 
 - 网络正常时继续监测
 - 检测到断线时自动重试登录
-- 不会在登录成功后自动关闭应用
+- 关闭应用界面后服务仍可继续运行
+- 可通过通知中的“停止保活”操作结束服务
+
+Android 13 及以上会询问通知权限。拒绝权限不会阻止保活服务运行，但通知可能只在系统任务管理器中显示。设备重启或用户强制停止应用后不会自动恢复服务。
 
 ### 普通模式
 
@@ -95,7 +101,7 @@ macOS / Linux:
 
 ## CSV 配置格式
 
-导入文件使用 UTF-8 编码的 CSV。代码当前识别以下表头：
+推荐使用 UTF-8 编码的标准 CSV；程序也会兼容 GBK/GB18030 文件、UTF-8 BOM、引号字段、字段内逗号和多行字段。代码识别以下表头：
 
 - `学号`
 - `身份证号`
@@ -121,8 +127,11 @@ macOS / Linux:
 2. 通过访问 `https://www.baidu.com` 检查当前网络是否已经可用
 3. 如果未联网，则向校园网网关发起登录请求
 4. 登录失败时切换到下一个账号继续尝试
-5. 如果识别到账号或密码错误，会将该账号从本地列表中移除
-6. 登录成功后保存下一个待尝试的账号索引，供下次启动继续使用
+5. 每个账号优先使用上次成功的运营商，否则先移动后电信
+6. 只有服务端明确返回 `userid error` 时才会将账号从本地列表中移除
+7. 登录成功后立即切换并保存下一个待尝试的账号索引
+
+手动注销时，应用会先关闭保活服务，然后读取当前会话身份、尝试解绑 MAC、注销 Dr.COM 会话，并通过状态接口确认已经离线。
 
 ## 数据存储
 
@@ -132,6 +141,7 @@ macOS / Linux:
 - `current_index.txt`：当前轮换索引
 - `campus_config.txt`：当前校区登录地址
 - `keep_alive_config.txt`：是否开启保活模式
+- `login_preferences.json`：账号上次成功的运营商和最后成功账号
 
 请注意保护您的隐私。
 
@@ -140,10 +150,14 @@ macOS / Linux:
 ```text
 app/
   src/main/java/top/onering/easyconnecter/
-    MainActivity.kt              # Compose UI 与主流程
-    data/AccountManager.kt       # 账号与本地配置管理
+    MainActivity.kt              # Activity 入口与系统权限交互
+    MainViewModel.kt             # 界面状态和用户操作
+    domain/ConnectionCoordinator.kt # 登录轮换、注销和并发协调
+    data/                        # 账号、配置、日志与 CSV 管理
     model/Account.kt             # 账号数据模型
-    network/NetworkManager.kt    # 网络检测与登录请求
+    network/DrcomClient.kt       # 网络检测与 Dr.COM 协议
+    service/KeepAliveService.kt  # 前台保活服务
+    ui/                          # Compose 页面和弹窗
   src/main/res/
     xml/network_security_config.xml
 ```
@@ -156,7 +170,8 @@ app/
 
 ## 已知限制
 
-- 当前逻辑依赖固定的 Dr.COM 登录接口参数
+- 当前逻辑依赖固定的 Dr.COM 登录、状态和注销接口参数
+- 忠山校区的 `:801/eportal` 解绑接口按城北校区的同构路径实现，需在真实网络中验证
 - 网络连通性检测使用 `https://www.baidu.com`，在某些网络环境下可能误判
 - 项目主要面向SWMU校园网场景，迁移到其他学校通常需要调整代码
 
