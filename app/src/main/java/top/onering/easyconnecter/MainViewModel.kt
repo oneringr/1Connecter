@@ -63,7 +63,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         observeRepositories()
         when {
-            container.accounts.accounts.value.isEmpty() -> Unit
+            container.accounts.accounts.value.isEmpty() -> {
+                if (container.config.keepAlive.value) {
+                    container.logs.add("服务模式已恢复，等待导入账号")
+                }
+            }
             container.config.keepAlive.value -> KeepAliveService.start(application)
             else -> startNormalMode()
         }
@@ -72,11 +76,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setKeepAlive(enabled: Boolean) {
         autoClose = false
         viewModelScope.launch {
+            container.config.setKeepAlive(enabled)
             if (enabled && container.accounts.accounts.value.isEmpty()) {
-                _events.emit(MainUiEvent.Toast("请先导入账号配置"))
+                normalModeJob?.cancel()
+                KeepAliveService.stop(getApplication())
+                container.logs.add("服务模式已记住，等待导入账号")
+                _events.emit(MainUiEvent.Toast("服务模式已记住，导入账号后自动启用"))
                 return@launch
             }
-            container.config.setKeepAlive(enabled)
             if (enabled) {
                 normalModeJob?.cancel()
                 KeepAliveService.start(getApplication())
@@ -135,8 +142,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val removed = container.coordinator.removeAccount(index) ?: return@launch
             container.logs.add("手动删除账号: ${removed.name.ifBlank { removed.studentId }}")
             if (container.accounts.accounts.value.isEmpty()) {
-                container.config.setKeepAlive(false)
                 KeepAliveService.stop(getApplication())
+                if (container.config.keepAlive.value) {
+                    container.logs.add("没有可用账号，服务已暂停，保留服务模式开关")
+                }
             }
         }
     }

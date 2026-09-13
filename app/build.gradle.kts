@@ -12,8 +12,8 @@ android {
         applicationId = "top.onering.easyconnecter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 104
-        versionName = "1.4"
+        versionCode = 105
+        versionName = "1.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

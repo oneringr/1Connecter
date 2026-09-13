@@ -13,12 +13,14 @@ import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.Carrier
 import java.io.File
 
-class ConfigRepository(context: Context) : ConfigStore {
+class ConfigRepository internal constructor(directory: File) : ConfigStore {
+    constructor(context: Context) : this(context.filesDir)
+
     private val gson = Gson()
-    private val indexFile = File(context.filesDir, "current_index.txt")
-    private val campusFile = File(context.filesDir, "campus_config.txt")
-    private val keepAliveFile = File(context.filesDir, "keep_alive_config.txt")
-    private val loginPreferencesFile = File(context.filesDir, "login_preferences.json")
+    private val indexFile = File(directory, "current_index.txt")
+    private val campusFile = File(directory, "campus_config.txt")
+    private val keepAliveFile = File(directory, "keep_alive_config.txt")
+    private val loginPreferencesFile = File(directory, "login_preferences.json")
     private val mutex = Mutex()
 
     private val _currentIndex = MutableStateFlow(readInt(indexFile, 0))

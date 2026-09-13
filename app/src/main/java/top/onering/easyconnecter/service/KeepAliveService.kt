@@ -72,7 +72,7 @@ class KeepAliveService : Service() {
                     appContainer.runtime.update(status)
                     updateNotification(status.message, status.accountName)
                     if (outcome == ConnectionOutcome.NoAccounts) {
-                        appContainer.config.setKeepAlive(false)
+                        appContainer.logs.add("没有可用账号，服务已暂停，保留服务模式开关")
                     }
                 }
             } catch (error: CancellationException) {

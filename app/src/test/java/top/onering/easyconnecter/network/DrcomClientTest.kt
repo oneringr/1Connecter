@@ -98,6 +98,16 @@ class DrcomClientTest {
     }
 
     @Test
+    fun recognizesClientIpOnlineFromFallbackMessageIgnoringCaseAndOuterWhitespace() {
+        val outcome = client.parseLoginResponse(
+            "dr1003({\"result\":0,\"msg\":\" CLIENTIP ONLINE \"})",
+            Carrier.MOBILE
+        )
+
+        assertTrue(outcome is LoginOutcome.ClientIpOnline)
+    }
+
+    @Test
     fun delegatesConnectivityCheckToPingProbe() = runTest {
         var probeCalls = 0
         val probeClient = DrcomClient(

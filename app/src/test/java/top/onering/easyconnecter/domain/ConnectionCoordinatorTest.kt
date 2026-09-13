@@ -1,7 +1,10 @@
 package top.onering.easyconnecter.domain
 
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -132,27 +135,70 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun logsOutOnceAndRetriesSameLoginForClientIpOnline() = runTest {
+    fun waitsFiveSecondsAfterLogoutCompletesBeforeRetryingSameLogin() = runTest {
         val accounts = FakeAccountStore(listOf(account("one")))
-        val config = FakeConfigStore()
+        val config = FakeConfigStore().apply { setKeepAlive(true) }
+        var now = 0L
+        var logoutCompletedAt = 0L
+        val loginStartedTimes = mutableListOf<Long>()
+        val waits = mutableListOf<Long>()
         val gateway = FakeNetworkGateway(
             loginOutcomes = mutableListOf(
                 LoginOutcome.ClientIpOnline("clientip online"),
                 LoginOutcome.Success(Carrier.MOBILE)
-            )
+            ),
+            onLogin = { loginStartedTimes += now },
+            onLogout = {
+                now += 2_000L
+                logoutCompletedAt = now
+            }
         )
 
-        val outcome = coordinator(accounts, config, gateway).connectOnce()
+        val outcome = coordinator(accounts, config, gateway, { now }) {
+            waits += it
+            now += it
+        }.connectOnce()
 
         assertTrue(outcome is ConnectionOutcome.Connected)
         assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE), gateway.loginCarriers)
         assertEquals(1, gateway.logoutCalls)
+        assertEquals(listOf("login", "logout", "login"), gateway.calls)
+        assertEquals(listOf(5_000L), waits)
+        assertEquals(5_000L, loginStartedTimes[1] - logoutCompletedAt)
+        assertTrue(config.keepAlive.value)
+    }
+
+    @Test
+    fun waitsFiveSecondsAndRetriesEvenWhenLogoutRequestFails() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one")))
+        val config = FakeConfigStore()
+        var now = 0L
+        val waits = mutableListOf<Long>()
+        val gateway = FakeNetworkGateway(
+            loginOutcomes = mutableListOf(
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.Success(Carrier.MOBILE)
+            ),
+            logoutResult = Result.failure(IllegalStateException("logout rejected"))
+        )
+
+        val outcome = coordinator(accounts, config, gateway, { now }) {
+            waits += it
+            now += it
+        }.connectOnce()
+
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertEquals(listOf("login", "logout", "login"), gateway.calls)
+        assertEquals(listOf(5_000L), waits)
+        assertEquals(1, accounts.accounts.value.size)
     }
 
     @Test
     fun clientIpOnlineRecoveryDoesNotLoopLogout() = runTest {
         val accounts = FakeAccountStore(listOf(account("one")))
         val config = FakeConfigStore()
+        var now = 0L
+        val waits = mutableListOf<Long>()
         val gateway = FakeNetworkGateway(
             loginOutcomes = mutableListOf(
                 LoginOutcome.ClientIpOnline("clientip online"),
@@ -161,10 +207,73 @@ class ConnectionCoordinatorTest {
             )
         )
 
-        coordinator(accounts, config, gateway).connectOnce()
+        coordinator(accounts, config, gateway, { now }) {
+            waits += it
+            now += it
+        }.connectOnce()
 
         assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE, Carrier.TELECOM), gateway.loginCarriers)
         assertEquals(1, gateway.logoutCalls)
+        assertEquals(1, waits.count { it == 5_000L })
+    }
+
+    @Test
+    fun cancellationDuringRecoveryWaitPreventsRetry() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one")))
+        val config = FakeConfigStore()
+        val gateway = FakeNetworkGateway(
+            loginOutcomes = mutableListOf(
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.Success(Carrier.MOBILE)
+            )
+        )
+        val waitStarted = CompletableDeferred<Unit>()
+        val waitFinished = CompletableDeferred<Unit>()
+        val coordinator = coordinator(accounts, config, gateway) {
+            assertEquals(5_000L, it)
+            waitStarted.complete(Unit)
+            waitFinished.await()
+        }
+        val connection = launch { coordinator.connectOnce() }
+
+        waitStarted.await()
+        connection.cancelAndJoin()
+
+        assertEquals(listOf(Carrier.MOBILE), gateway.loginCarriers)
+        assertEquals(1, gateway.logoutCalls)
+    }
+
+    @Test
+    fun pausesKeepAliveWithoutClearingRememberedSwitchWhenNoAccountsRemain() = runTest {
+        val accounts = FakeAccountStore(listOf(account("bad")))
+        val config = FakeConfigStore().apply { setKeepAlive(true) }
+        val gateway = FakeNetworkGateway(
+            loginOutcomes = mutableListOf(LoginOutcome.InvalidCredentials("账号或密码错误"))
+        )
+        val outcomes = mutableListOf<ConnectionOutcome>()
+
+        coordinator(accounts, config, gateway).runKeepAlive { outcomes += it }
+
+        assertTrue(outcomes.first() is ConnectionOutcome.AccountRemoved)
+        assertEquals(ConnectionOutcome.NoAccounts, outcomes.last())
+        assertTrue(accounts.accounts.value.isEmpty())
+        assertTrue(config.keepAlive.value)
+        assertEquals(5, gateway.connectivityChecks)
+    }
+
+    @Test
+    fun rememberedKeepAliveDoesNotProbeOrLoginWithoutAccounts() = runTest {
+        val accounts = FakeAccountStore(emptyList())
+        val config = FakeConfigStore().apply { setKeepAlive(true) }
+        val gateway = FakeNetworkGateway()
+        val outcomes = mutableListOf<ConnectionOutcome>()
+
+        coordinator(accounts, config, gateway).runKeepAlive { outcomes += it }
+
+        assertEquals(listOf(ConnectionOutcome.NoAccounts), outcomes)
+        assertTrue(config.keepAlive.value)
+        assertEquals(0, gateway.connectivityChecks)
+        assertTrue(gateway.loginCarriers.isEmpty())
     }
 
     @Test
@@ -278,7 +387,10 @@ class ConnectionCoordinatorTest {
         private val loginOutcomes: MutableList<LoginOutcome> = mutableListOf(),
         private val statuses: MutableList<Result<SessionStatus>> = mutableListOf(),
         private val unbindResult: Result<Unit> = Result.success(Unit),
-        private val connectivityResults: MutableList<Boolean> = mutableListOf()
+        private val connectivityResults: MutableList<Boolean> = mutableListOf(),
+        private val logoutResult: Result<Unit> = Result.success(Unit),
+        private val onLogin: () -> Unit = {},
+        private val onLogout: suspend () -> Unit = {}
     ) : NetworkGateway {
         val loginCarriers = mutableListOf<Carrier>()
         val calls = mutableListOf<String>()
@@ -298,6 +410,8 @@ class ConnectionCoordinatorTest {
             campus: Campus,
             carrier: Carrier
         ): LoginOutcome {
+            calls += "login"
+            onLogin()
             loginCarriers += carrier
             return loginOutcomes.removeAt(0)
         }
@@ -322,7 +436,8 @@ class ConnectionCoordinatorTest {
         override suspend fun logout(campus: Campus): Result<Unit> {
             calls += "logout"
             logoutCalls++
-            return Result.success(Unit)
+            onLogout()
+            return logoutResult
         }
     }
 }

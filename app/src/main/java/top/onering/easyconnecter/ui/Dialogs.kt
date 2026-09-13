@@ -103,7 +103,7 @@ fun AboutDialog(onDismiss: () -> Unit) {
             Text(
                 "1Connecter（医连接）\nSWMU 校园网自动连接工具\n\n" +
                     "注意：本工具仅提供自动连接服务，不对您的信息来源负责！\n\n" +
-                    "V1.4 Beta Version\nMade By: OneRingR\nSpecially Thanks: Larry for work"
+                    "V1.5 Beta Version\nMade By: OneRingR\nSpecially Thanks: Larry for work"
             )
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("确定") } }

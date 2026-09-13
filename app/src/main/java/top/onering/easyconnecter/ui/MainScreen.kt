@@ -95,7 +95,14 @@ fun MainScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("服务模式")
+                            Column {
+                                Text("服务模式")
+                                Text(
+                                    "记住开关状态",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                             Switch(checked = state.keepAlive, onCheckedChange = null)
                         }
                     },

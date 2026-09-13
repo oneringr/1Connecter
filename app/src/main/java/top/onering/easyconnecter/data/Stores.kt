@@ -14,6 +14,7 @@ interface AccountStore {
 interface ConfigStore {
     val currentIndex: StateFlow<Int>
     val campus: StateFlow<Campus>
+    // Remember the user's switch choice, independently of whether the service can run now.
     val keepAlive: StateFlow<Boolean>
     suspend fun setCurrentIndex(index: Int)
     suspend fun setCampus(campus: Campus)

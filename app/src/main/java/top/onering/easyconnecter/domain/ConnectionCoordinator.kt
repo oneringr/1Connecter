@@ -85,7 +85,7 @@ class ConnectionCoordinator(
                             break
                         }
                         clientIpOnlineRecoveryUsed = true
-                        logRepository.add("⚠️ 检测到 clientip online，注销当前会话后重试${carrier.displayName}")
+                        logRepository.add("⚠️ 检测到 clientip online，注销当前会话后等待 5 秒再重试${carrier.displayName}")
                         val logoutResult = networkGateway.logout(configRepository.campus.value)
                         if (logoutResult.isSuccess) {
                             logRepository.add("已请求注销当前校园网会话")
@@ -96,6 +96,7 @@ class ConnectionCoordinator(
                                     "，仍重试当前登录"
                             )
                         }
+                        sleep(CLIENT_IP_ONLINE_RETRY_DELAY_MILLIS)
                     }
 
                     is LoginOutcome.RateLimited -> {
@@ -129,7 +130,11 @@ class ConnectionCoordinator(
 
     suspend fun runKeepAlive(onOutcome: suspend (ConnectionOutcome) -> Unit = {}) {
         while (currentCoroutineContext().isActive && configRepository.keepAlive.value) {
-            val outcome = connectOnce()
+            val outcome = if (accountRepository.accounts.value.isEmpty()) {
+                ConnectionOutcome.NoAccounts
+            } else {
+                connectOnce()
+            }
             onOutcome(outcome)
             val waitMillis = when (outcome) {
                 is ConnectionOutcome.Connected -> KEEP_ALIVE_INTERVAL_MILLIS
@@ -282,6 +287,7 @@ class ConnectionCoordinator(
         const val MIN_LOGIN_INTERVAL_SECONDS = 3
         const val MIN_LOGIN_INTERVAL_MILLIS = MIN_LOGIN_INTERVAL_SECONDS * 1_000L
         const val KEEP_ALIVE_INTERVAL_MILLIS = 60_000L
+        const val CLIENT_IP_ONLINE_RETRY_DELAY_MILLIS = 5_000L
         const val CONNECTIVITY_PROBE_ATTEMPTS = 5
         const val STATUS_CONFIRM_ATTEMPTS = 3
         const val STATUS_CONFIRM_DELAY_MILLIS = 1_000L
