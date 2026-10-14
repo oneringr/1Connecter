@@ -22,6 +22,8 @@ class MainScreenTest {
     @Test
     fun drawerActionsOpenAccountCampusAndAboutDialogs() {
         var csvExportRequests = 0
+        var restartRequests = 0
+        var restartDismissals = 0
         composeRule.setContent {
             var state by remember {
                 mutableStateOf(
@@ -50,7 +52,20 @@ class MainScreenTest {
                 onDismissAbout = { state = state.copy(showAboutDialog = false) },
                 onShowLogout = { state = state.copy(showLogoutDialog = true) },
                 onDismissLogout = { state = state.copy(showLogoutDialog = false) },
-                onConfirmLogout = {},
+                onConfirmLogout = {
+                    state = state.copy(
+                        showLogoutDialog = false,
+                        restartAfterLogoutMessage = "校园网已解绑并注销"
+                    )
+                },
+                onRestartAfterLogout = {
+                    restartRequests++
+                    state = state.copy(restartAfterLogoutMessage = null)
+                },
+                onDismissRestartAfterLogout = {
+                    restartDismissals++
+                    state = state.copy(restartAfterLogoutMessage = null)
+                },
                 onExportLogs = {}
             )
         }
@@ -69,7 +84,15 @@ class MainScreenTest {
 
         openDrawerAndClick("注销校园网")
         composeRule.onNodeWithText("解绑并注销").assertIsDisplayed()
-        composeRule.onNodeWithText("取消").performClick()
+        composeRule.onNodeWithText("解绑并注销").performClick()
+        composeRule.onNodeWithText("是否立即重启软件？", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("暂不重启").performClick()
+        assertEquals(1, restartDismissals)
+
+        openDrawerAndClick("注销校园网")
+        composeRule.onNodeWithText("解绑并注销").performClick()
+        composeRule.onNodeWithText("立即重启").performClick()
+        assertEquals(1, restartRequests)
 
         openDrawerAndClick("导出配置 (CSV)")
         assertEquals(1, csvExportRequests)

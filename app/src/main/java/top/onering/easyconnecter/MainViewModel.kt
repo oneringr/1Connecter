@@ -18,6 +18,7 @@ import top.onering.easyconnecter.data.RuntimeStatus
 import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.ConnectionOutcome
+import top.onering.easyconnecter.model.LogoutOutcome
 import top.onering.easyconnecter.service.KeepAliveService
 
 data class MainUiState(
@@ -32,6 +33,7 @@ data class MainUiState(
     val showCampusDialog: Boolean = false,
     val showAboutDialog: Boolean = false,
     val showLogoutDialog: Boolean = false,
+    val restartAfterLogoutMessage: String? = null,
     val showFireworks: Boolean = false,
     val isBusy: Boolean = false
 )
@@ -39,6 +41,7 @@ data class MainUiState(
 sealed interface MainUiEvent {
     data class Toast(val message: String) : MainUiEvent
     data object CloseApp : MainUiEvent
+    data object RestartApp : MainUiEvent
 }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -196,6 +199,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun showLogoutDialog() = interact { it.copy(showLogoutDialog = true) }
     fun dismissLogoutDialog() = _uiState.update { it.copy(showLogoutDialog = false) }
 
+    fun dismissRestartAfterLogout() {
+        container.logs.add("已选择暂不重启，连接服务保持暂停")
+        _uiState.update { it.copy(restartAfterLogoutMessage = null) }
+    }
+
+    fun restartAfterLogout() {
+        container.logs.add("正在重启应用并恢复已记忆的服务模式")
+        _uiState.update { it.copy(restartAfterLogoutMessage = null) }
+        viewModelScope.launch { _events.emit(MainUiEvent.RestartApp) }
+    }
+
     fun markUserInteraction() {
         autoClose = false
     }
@@ -224,11 +238,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _uiState.update { it.copy(showLogoutDialog = false, isBusy = true) }
             normalModeJob?.cancel()
-            container.config.setKeepAlive(false)
             KeepAliveService.stop(getApplication())
             val result = container.coordinator.logoutAndUnbind()
-            _events.emit(MainUiEvent.Toast(result.message))
-            _uiState.update { it.copy(isBusy = false, showFireworks = false) }
+            if (shouldPromptRestartAfterLogout(result)) {
+                container.logs.add("校园网已注销，等待用户选择是否重启")
+                _uiState.update {
+                    it.copy(
+                        isBusy = false,
+                        showFireworks = false,
+                        restartAfterLogoutMessage = result.message
+                    )
+                }
+            } else {
+                _events.emit(MainUiEvent.Toast(result.message))
+                _uiState.update { it.copy(isBusy = false, showFireworks = false) }
+            }
         }
     }
 
@@ -293,3 +317,5 @@ internal fun shouldAutoCloseAfterConnection(
 ): Boolean = autoCloseEnabled &&
     outcome is ConnectionOutcome.Connected &&
     !outcome.alreadyConnected
+
+internal fun shouldPromptRestartAfterLogout(outcome: LogoutOutcome): Boolean = outcome.sessionLoggedOut

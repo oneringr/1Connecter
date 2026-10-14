@@ -2,6 +2,7 @@ package top.onering.easyconnecter
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
@@ -66,6 +67,7 @@ class MainActivity : ComponentActivity() {
                     viewModel.events.collect { event ->
                         when (event) {
                             MainUiEvent.CloseApp -> finish()
+                            MainUiEvent.RestartApp -> restartApplication()
                             is MainUiEvent.Toast -> Toast.makeText(
                                 this@MainActivity,
                                 event.message,
@@ -113,6 +115,8 @@ class MainActivity : ComponentActivity() {
                     onShowLogout = viewModel::showLogoutDialog,
                     onDismissLogout = viewModel::dismissLogoutDialog,
                     onConfirmLogout = viewModel::confirmLogout,
+                    onRestartAfterLogout = viewModel::restartAfterLogout,
+                    onDismissRestartAfterLogout = viewModel::dismissRestartAfterLogout,
                     onExportLogs = {
                         viewModel.markUserInteraction()
                         val needsPermission = Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
@@ -129,5 +133,16 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    private fun restartApplication() {
+        val restartIntent = packageManager.getLaunchIntentForPackage(packageName)
+        if (restartIntent == null) {
+            Toast.makeText(this, "无法获取应用启动入口，请手动重启", Toast.LENGTH_LONG).show()
+            return
+        }
+        restartIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+        startActivity(restartIntent)
+        finishAffinity()
     }
 }

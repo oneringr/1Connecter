@@ -46,8 +46,8 @@ class ConnectionCoordinator(
             listOf(preferredCarrier, preferredCarrier.alternate())
         }
 
-        var clientIpOnlineRecoveryUsed = false
         for (carrier in carriers) {
+            var clientIpOnlineRetryCount = 0
             var rateLimitRetried = false
             while (true) {
                 enforceLoginInterval()
@@ -80,12 +80,19 @@ class ConnectionCoordinator(
                     }
 
                     is LoginOutcome.ClientIpOnline -> {
-                        if (clientIpOnlineRecoveryUsed) {
-                            logRepository.add("⚠️ clientip online 重试后仍存在，本轮不再重复注销")
+                        if (clientIpOnlineRetryCount >= MAX_CLIENT_IP_ONLINE_RETRIES) {
+                            logRepository.add(
+                                "⚠️ clientip online 在等待 60 秒重试后仍存在，" +
+                                    "停止尝试${carrier.displayName}"
+                            )
                             break
                         }
-                        clientIpOnlineRecoveryUsed = true
-                        logRepository.add("⚠️ 检测到 clientip online，注销当前会话后等待 5 秒再重试${carrier.displayName}")
+                        clientIpOnlineRetryCount++
+                        val waitMillis = clientIpOnlineRetryCount * CLIENT_IP_ONLINE_RETRY_STEP_MILLIS
+                        logRepository.add(
+                            "⚠️ 检测到 clientip online，第 $clientIpOnlineRetryCount 次注销当前会话，" +
+                                "${waitMillis / 1_000} 秒后重试${carrier.displayName}"
+                        )
                         val logoutResult = networkGateway.logout(configRepository.campus.value)
                         if (logoutResult.isSuccess) {
                             logRepository.add("已请求注销当前校园网会话")
@@ -93,10 +100,10 @@ class ConnectionCoordinator(
                             logRepository.add(
                                 "⚠️ 校园网注销请求失败: " +
                                     (logoutResult.exceptionOrNull()?.message ?: "未知错误") +
-                                    "，仍重试当前登录"
+                                    "，仍按计划等待后重试"
                             )
                         }
-                        sleep(CLIENT_IP_ONLINE_RETRY_DELAY_MILLIS)
+                        sleep(waitMillis)
                     }
 
                     is LoginOutcome.RateLimited -> {
@@ -162,7 +169,6 @@ class ConnectionCoordinator(
     }
 
     suspend fun logoutAndUnbind(): LogoutOutcome = operationMutex.withLock {
-        configRepository.setKeepAlive(false)
         val campus = configRepository.campus.value
         val warnings = mutableListOf<String>()
         val initialStatusResult = networkGateway.checkStatus(campus)
@@ -287,7 +293,8 @@ class ConnectionCoordinator(
         const val MIN_LOGIN_INTERVAL_SECONDS = 3
         const val MIN_LOGIN_INTERVAL_MILLIS = MIN_LOGIN_INTERVAL_SECONDS * 1_000L
         const val KEEP_ALIVE_INTERVAL_MILLIS = 60_000L
-        const val CLIENT_IP_ONLINE_RETRY_DELAY_MILLIS = 5_000L
+        const val CLIENT_IP_ONLINE_RETRY_STEP_MILLIS = 10_000L
+        const val MAX_CLIENT_IP_ONLINE_RETRIES = 6
         const val CONNECTIVITY_PROBE_ATTEMPTS = 5
         const val STATUS_CONFIRM_ATTEMPTS = 3
         const val STATUS_CONFIRM_DELAY_MILLIS = 1_000L

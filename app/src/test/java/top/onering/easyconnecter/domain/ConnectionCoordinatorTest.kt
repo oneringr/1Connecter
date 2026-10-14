@@ -135,7 +135,7 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun waitsFiveSecondsAfterLogoutCompletesBeforeRetryingSameLogin() = runTest {
+    fun waitsTenSecondsAfterLogoutCompletesBeforeRetryingSameLogin() = runTest {
         val accounts = FakeAccountStore(listOf(account("one")))
         val config = FakeConfigStore().apply { setKeepAlive(true) }
         var now = 0L
@@ -163,13 +163,13 @@ class ConnectionCoordinatorTest {
         assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE), gateway.loginCarriers)
         assertEquals(1, gateway.logoutCalls)
         assertEquals(listOf("login", "logout", "login"), gateway.calls)
-        assertEquals(listOf(5_000L), waits)
-        assertEquals(5_000L, loginStartedTimes[1] - logoutCompletedAt)
+        assertEquals(listOf(10_000L), waits)
+        assertEquals(10_000L, loginStartedTimes[1] - logoutCompletedAt)
         assertTrue(config.keepAlive.value)
     }
 
     @Test
-    fun waitsFiveSecondsAndRetriesEvenWhenLogoutRequestFails() = runTest {
+    fun waitsTenSecondsAndRetriesEvenWhenLogoutRequestFails() = runTest {
         val accounts = FakeAccountStore(listOf(account("one")))
         val config = FakeConfigStore()
         var now = 0L
@@ -189,12 +189,12 @@ class ConnectionCoordinatorTest {
 
         assertTrue(outcome is ConnectionOutcome.Connected)
         assertEquals(listOf("login", "logout", "login"), gateway.calls)
-        assertEquals(listOf(5_000L), waits)
+        assertEquals(listOf(10_000L), waits)
         assertEquals(1, accounts.accounts.value.size)
     }
 
     @Test
-    fun clientIpOnlineRecoveryDoesNotLoopLogout() = runTest {
+    fun increasesClientIpOnlineWaitToSixtySecondsThenTriesAlternateCarrier() = runTest {
         val accounts = FakeAccountStore(listOf(account("one")))
         val config = FakeConfigStore()
         var now = 0L
@@ -203,7 +203,12 @@ class ConnectionCoordinatorTest {
             loginOutcomes = mutableListOf(
                 LoginOutcome.ClientIpOnline("clientip online"),
                 LoginOutcome.ClientIpOnline("clientip online"),
-                LoginOutcome.ClientIpOnline("clientip online")
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.ClientIpOnline("clientip online"),
+                LoginOutcome.Success(Carrier.TELECOM)
             )
         )
 
@@ -212,9 +217,12 @@ class ConnectionCoordinatorTest {
             now += it
         }.connectOnce()
 
-        assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE, Carrier.TELECOM), gateway.loginCarriers)
-        assertEquals(1, gateway.logoutCalls)
-        assertEquals(1, waits.count { it == 5_000L })
+        assertEquals(List(7) { Carrier.MOBILE } + Carrier.TELECOM, gateway.loginCarriers)
+        assertEquals(6, gateway.logoutCalls)
+        assertEquals(
+            listOf(10_000L, 20_000L, 30_000L, 40_000L, 50_000L, 60_000L, 3_000L),
+            waits
+        )
     }
 
     @Test
@@ -230,7 +238,7 @@ class ConnectionCoordinatorTest {
         val waitStarted = CompletableDeferred<Unit>()
         val waitFinished = CompletableDeferred<Unit>()
         val coordinator = coordinator(accounts, config, gateway) {
-            assertEquals(5_000L, it)
+            assertEquals(10_000L, it)
             waitStarted.complete(Unit)
             waitFinished.await()
         }
@@ -293,7 +301,7 @@ class ConnectionCoordinatorTest {
         assertTrue(result.sessionLoggedOut)
         assertTrue(result.unbindAttempted)
         assertEquals(true, result.unbindSucceeded)
-        assertFalse(config.keepAlive.value)
+        assertTrue(config.keepAlive.value)
         assertEquals("AABBCCDDEEFF", gateway.unboundMac)
         assertEquals("174742683", gateway.unboundIp)
         assertEquals(listOf("status", "unbind", "logout", "status"), gateway.calls)

@@ -70,6 +70,8 @@ fun MainScreen(
     onShowLogout: () -> Unit,
     onDismissLogout: () -> Unit,
     onConfirmLogout: () -> Unit,
+    onRestartAfterLogout: () -> Unit,
+    onDismissRestartAfterLogout: () -> Unit,
     onExportLogs: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
@@ -247,6 +249,9 @@ fun MainScreen(
     }
     if (state.showAboutDialog) AboutDialog(onDismissAbout)
     if (state.showLogoutDialog) LogoutDialog(onConfirmLogout, onDismissLogout)
+    state.restartAfterLogoutMessage?.let { message ->
+        RestartAfterLogoutDialog(message, onRestartAfterLogout, onDismissRestartAfterLogout)
+    }
 }
 
 @Composable

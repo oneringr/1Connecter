@@ -4,6 +4,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import top.onering.easyconnecter.model.ConnectionOutcome
+import top.onering.easyconnecter.model.LogoutOutcome
 
 class MainViewModelLogicTest {
     @Test
@@ -19,5 +20,19 @@ class MainViewModelLogicTest {
 
         assertTrue(shouldAutoCloseAfterConnection(outcome, autoCloseEnabled = true))
         assertFalse(shouldAutoCloseAfterConnection(outcome, autoCloseEnabled = false))
+    }
+
+    @Test
+    fun restartPromptOnlyAppearsAfterConfirmedLogout() {
+        val successful = LogoutOutcome(
+            sessionLoggedOut = true,
+            unbindAttempted = true,
+            unbindSucceeded = true,
+            logoutRequestSucceeded = true,
+            message = "校园网已解绑并注销"
+        )
+
+        assertTrue(shouldPromptRestartAfterLogout(successful))
+        assertFalse(shouldPromptRestartAfterLogout(successful.copy(sessionLoggedOut = false)))
     }
 }

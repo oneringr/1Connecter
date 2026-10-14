@@ -88,9 +88,25 @@ fun LogoutDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("注销校园网") },
-        text = { Text("注销将关闭服务模式，并尝试解除 MAC 绑定。是否继续？") },
+        text = { Text("注销期间会暂停当前连接服务，但保留服务模式开关设置。是否继续？") },
         confirmButton = { TextButton(onClick = onConfirm) { Text("解绑并注销") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+}
+
+@Composable
+fun RestartAfterLogoutDialog(message: String, onRestart: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("校园网已注销") },
+        text = {
+            Text(
+                "$message\n\n是否立即重启软件？暂不重启时，连接服务将保持暂停，" +
+                    "服务模式开关状态不会改变。"
+            )
+        },
+        confirmButton = { TextButton(onClick = onRestart) { Text("立即重启") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("暂不重启") } }
     )
 }
 
@@ -103,7 +119,7 @@ fun AboutDialog(onDismiss: () -> Unit) {
             Text(
                 "1Connecter（医连接）\nSWMU 校园网自动连接工具\n\n" +
                     "注意：本工具仅提供自动连接服务，不对您的信息来源负责！\n\n" +
-                    "V1.5 Beta Version\nMade By: OneRingR\nSpecially Thanks: Larry for work"
+                    "V1.6\nMade By: OneRingR\nSpecially Thanks: Larry for work"
             )
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("确定") } }
