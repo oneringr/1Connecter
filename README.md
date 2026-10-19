@@ -1,6 +1,7 @@
 <a id="readme-top"></a>
 
 <div align="center">
+  <img src="app/src/main/res/mipmap-xxxhdpi/ic_launcher.png" alt="1Connecter 项目图标" width="128" height="128">
   <h1>1Connecter</h1>
   <p>面向 SWMU 校园网的 Android 自动登录与断线恢复工具</p>
   <p>
