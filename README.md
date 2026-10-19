@@ -52,6 +52,14 @@
 - 关于页支持项目链接和手动检查 GitHub 正式版本；补充开关名称与选中状态的无障碍信息。
 - 将账号、登录偏好和待恢复会话排除在系统云备份与设备迁移之外；更换设备请使用 CSV 导出、导入。
 
+### 界面截图
+
+以下为 2.0 浅色主题的 Android 9 真机截图。账号列表保持折叠，不展示个人账号信息。
+
+| 首页 | 账号 | 日志 | 设置 |
+| :---: | :---: | :---: | :---: |
+| ![首页：连接状态与账号配置](docs/screenshots/home.png) | ![账号：CSV 导入导出与折叠列表](docs/screenshots/accounts.png) | ![日志：运行记录与导出](docs/screenshots/logs.png) | ![设置：服务模式、自动关闭与校区](docs/screenshots/settings.png) |
+
 ### 技术栈
 
 Kotlin · Jetpack Compose / Miuix · Kotlin Coroutines · OkHttp · Gson · Apache Commons CSV · Konfetti
