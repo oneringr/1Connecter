@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import top.onering.easyconnecter.BuildConfig
 import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.Campus
 
@@ -119,7 +120,7 @@ fun AboutDialog(onDismiss: () -> Unit) {
             Text(
                 "1Connecter（医连接）\nSWMU 校园网自动连接工具\n\n" +
                     "注意：本工具仅提供自动连接服务，不对您的信息来源负责！\n\n" +
-                    "V1.6\nMade By: OneRingR\nSpecially Thanks: Larry for work"
+                    "V${BuildConfig.VERSION_NAME}\nMade By: OneRingR\nSpecially Thanks: Larry for work"
             )
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("确定") } }

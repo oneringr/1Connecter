@@ -31,3 +31,9 @@ Thumbs.db
 
 # release
 /app/release/
+
+# Local account data, captures and signing materials
+/data.csv
+/HAR_校园网请求差异分析.md
+*.jks
+*.keystore

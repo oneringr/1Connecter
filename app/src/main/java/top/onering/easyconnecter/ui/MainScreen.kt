@@ -2,16 +2,21 @@ package top.onering.easyconnecter.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Menu
@@ -87,67 +92,76 @@ fun MainScreen(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet {
-                Spacer(Modifier.height(12.dp))
-                Text("医连接 - 菜单", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
-                HorizontalDivider()
-                NavigationDrawerItem(
-                    label = {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column {
-                                Text("服务模式")
-                                Text(
-                                    "记住开关状态",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(checked = state.keepAlive, onCheckedChange = null)
-                        }
-                    },
-                    selected = false,
-                    onClick = { onToggleKeepAlive(!state.keepAlive) }
-                )
-                NavigationDrawerItem(
-                    label = { Text("管理账号") },
-                    selected = false,
-                    onClick = { closeDrawerThen(onShowAccounts) }
-                )
-                NavigationDrawerItem(
-                    label = { Text("切换校区") },
-                    selected = false,
-                    onClick = { closeDrawerThen(onShowCampusDialog) }
-                )
-                NavigationDrawerItem(
-                    label = { Text("注销校园网") },
-                    selected = false,
-                    onClick = { closeDrawerThen(onShowLogout) }
-                )
-                NavigationDrawerItem(
-                    label = { Text("重新导入配置") },
-                    selected = false,
-                    onClick = { closeDrawerThen(onReimportCsv) }
-                )
-                NavigationDrawerItem(
-                    label = { Text("导出配置 (CSV)") },
-                    selected = false,
-                    onClick = { closeDrawerThen(onExportCsv) }
-                )
-                NavigationDrawerItem(
-                    label = { Text("导出日志") },
-                    selected = false,
-                    onClick = { closeDrawerThen(onExportLogs) }
-                )
-                Spacer(Modifier.weight(1f))
-                NavigationDrawerItem(
-                    label = { Text("关于") },
-                    selected = false,
-                    onClick = { closeDrawerThen(onShowAbout) }
-                )
-                Spacer(Modifier.height(12.dp))
+                BoxWithConstraints(Modifier.fillMaxHeight()) {
+                    Column(
+                        Modifier
+                            .verticalScroll(rememberScrollState())
+                            // Keep About at the bottom when the menu fits without scrolling.
+                            .heightIn(min = maxHeight)
+                    ) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("医连接 - 菜单", Modifier.padding(16.dp), style = MaterialTheme.typography.titleLarge)
+                        HorizontalDivider()
+                        NavigationDrawerItem(
+                            label = {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column {
+                                        Text("服务模式")
+                                        Text(
+                                            "记住开关状态",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    Switch(checked = state.keepAlive, onCheckedChange = null)
+                                }
+                            },
+                            selected = false,
+                            onClick = { onToggleKeepAlive(!state.keepAlive) }
+                        )
+                        NavigationDrawerItem(
+                            label = { Text("管理账号") },
+                            selected = false,
+                            onClick = { closeDrawerThen(onShowAccounts) }
+                        )
+                        NavigationDrawerItem(
+                            label = { Text("切换校区") },
+                            selected = false,
+                            onClick = { closeDrawerThen(onShowCampusDialog) }
+                        )
+                        NavigationDrawerItem(
+                            label = { Text("注销校园网") },
+                            selected = false,
+                            onClick = { closeDrawerThen(onShowLogout) }
+                        )
+                        NavigationDrawerItem(
+                            label = { Text("重新导入配置") },
+                            selected = false,
+                            onClick = { closeDrawerThen(onReimportCsv) }
+                        )
+                        NavigationDrawerItem(
+                            label = { Text("导出配置 (CSV)") },
+                            selected = false,
+                            onClick = { closeDrawerThen(onExportCsv) }
+                        )
+                        NavigationDrawerItem(
+                            label = { Text("导出日志") },
+                            selected = false,
+                            onClick = { closeDrawerThen(onExportLogs) }
+                        )
+                        Spacer(Modifier.weight(1f))
+                        NavigationDrawerItem(
+                            label = { Text("关于") },
+                            selected = false,
+                            onClick = { closeDrawerThen(onShowAbout) }
+                        )
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
             }
         }
     ) {

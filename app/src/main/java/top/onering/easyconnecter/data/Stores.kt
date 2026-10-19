@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.StateFlow
 import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.Carrier
+import top.onering.easyconnecter.model.PendingRecovery
 
 interface AccountStore {
     val accounts: StateFlow<List<Account>>
@@ -24,6 +25,8 @@ interface ConfigStore {
     suspend fun lastSuccessfulStudentId(): String?
     suspend fun removeAccountPreferences(studentId: String)
     suspend fun clearLoginPreferences()
+    suspend fun pendingRecovery(): PendingRecovery?
+    suspend fun setPendingRecovery(recovery: PendingRecovery?)
 }
 
 fun interface EventLogger {

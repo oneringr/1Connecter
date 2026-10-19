@@ -11,7 +11,12 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.Carrier
+import top.onering.easyconnecter.model.PendingRecovery
 import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 
 class ConfigRepository internal constructor(directory: File) : ConfigStore {
     constructor(context: Context) : this(context.filesDir)
@@ -21,6 +26,7 @@ class ConfigRepository internal constructor(directory: File) : ConfigStore {
     private val campusFile = File(directory, "campus_config.txt")
     private val keepAliveFile = File(directory, "keep_alive_config.txt")
     private val loginPreferencesFile = File(directory, "login_preferences.json")
+    private val pendingRecoveryFile = File(directory, "pending_recovery.json")
     private val mutex = Mutex()
 
     private val _currentIndex = MutableStateFlow(readInt(indexFile, 0))
@@ -80,6 +86,53 @@ class ConfigRepository internal constructor(directory: File) : ConfigStore {
         writeLoginPreferences()
     }
 
+    override suspend fun pendingRecovery(): PendingRecovery? = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            if (!pendingRecoveryFile.exists()) return@withContext null
+            try {
+                val saved = gson.fromJson(pendingRecoveryFile.readText(), PersistedRecovery::class.java)
+                    ?: throw IOException("恢复记录为空")
+                val campus = Campus.entries.firstOrNull { it.name == saved.campus }
+                    ?: throw IOException("恢复记录校区无效")
+                val carrier = Carrier.entries.firstOrNull { it.name == saved.carrier }
+                    ?: throw IOException("恢复记录运营商无效")
+                val studentId = saved.studentId?.takeIf { it.isNotBlank() }
+                    ?: throw IOException("恢复记录账号为空")
+                PendingRecovery(campus, studentId, carrier)
+            } catch (error: Exception) {
+                throw IOException("无法读取待恢复会话", error)
+            }
+        }
+    }
+
+    override suspend fun setPendingRecovery(recovery: PendingRecovery?) = mutex.withLock {
+        withContext(Dispatchers.IO) {
+            if (recovery == null) {
+                Files.deleteIfExists(pendingRecoveryFile.toPath())
+            } else {
+                val temporaryFile = File(pendingRecoveryFile.parentFile, "pending_recovery.json.tmp")
+                try {
+                    val json = gson.toJson(PersistedRecovery(
+                        campus = recovery.campus.name,
+                        studentId = recovery.studentId,
+                        carrier = recovery.carrier.name
+                    ))
+                    FileOutputStream(temporaryFile).use { output ->
+                        output.write(json.toByteArray(Charsets.UTF_8))
+                        output.fd.sync()
+                    }
+                    Files.move(
+                        temporaryFile.toPath(), pendingRecoveryFile.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING
+                    )
+                } finally {
+                    if (temporaryFile.isFile) temporaryFile.delete()
+                }
+            }
+            Unit
+        }
+    }
+
     private suspend fun writeLoginPreferences() = withContext(Dispatchers.IO) {
         loginPreferencesFile.writeText(gson.toJson(loginPreferences))
     }
@@ -110,5 +163,11 @@ class ConfigRepository internal constructor(directory: File) : ConfigStore {
         val version: Int = 1,
         val preferredCarrierByStudentId: Map<String, String> = emptyMap(),
         val lastSuccessfulStudentId: String? = null
+    )
+
+    private data class PersistedRecovery(
+        val campus: String? = null,
+        val studentId: String? = null,
+        val carrier: String? = null
     )
 }

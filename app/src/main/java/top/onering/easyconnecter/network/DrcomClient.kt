@@ -2,11 +2,16 @@ package top.onering.easyconnecter.network
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.Carrier
@@ -29,23 +34,65 @@ fun interface ConnectivityProbe {
     suspend fun ping(): Boolean
 }
 
-private class SystemPingConnectivityProbe(
-    private val host: String = "baidu.com"
+internal class HttpsConnectivityProbe(
+    client: OkHttpClient = OkHttpClient(),
+    private val urls: List<HttpUrl> = listOf(
+        "https://www.baidu.com/".toHttpUrl(),
+        "https://www.qq.com/".toHttpUrl()
+    )
 ) : ConnectivityProbe {
-    override suspend fun ping(): Boolean = withContext(Dispatchers.IO) {
-        var process: Process? = null
-        try {
-            process = ProcessBuilder("/system/bin/ping", "-c", "1", "-W", "2", host)
-                .redirectErrorStream(true)
-                .start()
-            process.waitFor(3, TimeUnit.SECONDS) && process.exitValue() == 0
-        } catch (_: Exception) {
-            false
-        } finally {
-            runCatching { process?.inputStream?.close() }
-            if (process?.isAlive == true) process.destroy()
-        }
+    private val probeClient = client.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .cache(null)
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(2, TimeUnit.SECONDS)
+        .callTimeout(3, TimeUnit.SECONDS)
+        .build()
+
+    init {
+        require(urls.isNotEmpty() && urls.all { it.isHttps }) { "联网探测必须使用 HTTPS" }
     }
+
+    override suspend fun ping(): Boolean {
+        for (url in urls) {
+            val reachable = try {
+                probeClient.executeCancellable(Request.Builder().url(url).build()) { response ->
+                    response.isSuccessful && response.handshake != null && response.request.url.isHttps
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: IOException) {
+                false
+            }
+            if (reachable) return true
+        }
+        return false
+    }
+}
+
+// Keep cancellation attached until the response body has been consumed and closed.
+// Cancelling only an enclosing withContext leaves a blocking OkHttp call running.
+private suspend fun <T> OkHttpClient.executeCancellable(
+    request: Request,
+    readResponse: (Response) -> T
+): T = suspendCancellableCoroutine { continuation ->
+    val call = newCall(request)
+    continuation.invokeOnCancellation { call.cancel() }
+    call.enqueue(object : Callback {
+        override fun onFailure(call: Call, error: IOException) {
+            continuation.resumeWith(Result.failure(error))
+        }
+
+        override fun onResponse(call: Call, response: Response) {
+            try {
+                val result = response.use(readResponse)
+                continuation.resumeWith(Result.success(result))
+            } catch (error: Exception) {
+                continuation.resumeWith(Result.failure(error))
+            }
+        }
+    })
 }
 
 interface NetworkGateway {
@@ -64,7 +111,7 @@ class DrcomClient(
             portalBase = "http://${campus.host}:801/".toHttpUrl()
         )
     },
-    private val connectivityProbe: ConnectivityProbe = SystemPingConnectivityProbe()
+    private val connectivityProbe: ConnectivityProbe = HttpsConnectivityProbe()
 ) : NetworkGateway {
     private val gson = Gson()
 
@@ -98,13 +145,16 @@ class DrcomClient(
 
         val request = portalRequest(url, campus)
         try {
-            client.newCall(request).execute().use { response ->
+            client.executeCancellable(request) { response ->
                 val body = response.body?.string().orEmpty()
                 if (!response.isSuccessful) {
-                    return@withContext LoginOutcome.NetworkError("HTTP ${response.code}")
+                    LoginOutcome.NetworkError("HTTP ${response.code}")
+                } else {
+                    parseLoginResponse(body, carrier)
                 }
-                parseLoginResponse(body, carrier)
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: IOException) {
             LoginOutcome.NetworkError("网络请求异常: ${error.message ?: "未知错误"}")
         } catch (error: Exception) {
@@ -121,10 +171,10 @@ class DrcomClient(
             .addQueryParameter("lang", "zh")
             .build()
         executeJsonp(portalRequest(url, campus)).mapCatching { json ->
-            val result = json.intValue("result")
-                ?: throw IOException("状态响应缺少 result")
+            val result = json.stringValue("result")
+            if (result != "0" && result != "1") throw IOException("状态响应 result 未知")
             SessionStatus(
-                loggedIn = result == 1,
+                loggedIn = result == "1",
                 account = json.stringValue("uid"),
                 mac = json.stringValue("ss4"),
                 ipv4 = json.stringValue("ss5") ?: json.stringValue("v46ip")
@@ -168,7 +218,9 @@ class DrcomClient(
         } catch (error: Exception) {
             return LoginOutcome.ProtocolError("无法解析登录响应: ${error.message ?: "未知错误"}")
         }
-        if (json.intValue("result") == 1) return LoginOutcome.Success(carrier)
+        val result = json.stringValue("result")
+        if (result == "1" || result == "ok") return LoginOutcome.Success(carrier)
+        if (result != "0") return LoginOutcome.ProtocolError("登录响应 result 未知")
 
         val serverMessage = json.stringValue("msga")
             ?: json.stringValue("msg")
@@ -198,7 +250,8 @@ class DrcomClient(
         } else {
             val start = trimmed.indexOf('(')
             val end = trimmed.lastIndexOf(')')
-            require(start >= 0 && end > start) { "不是有效的 JSONP" }
+            require(start > 0 && end > start && end == trimmed.lastIndex &&
+                JSONP_CALLBACK_REGEX.matches(trimmed.substring(0, start).trim())) { "不是有效的 JSONP" }
             trimmed.substring(start + 1, end).trim()
         }
         return gson.fromJson(jsonText, JsonObject::class.java)
@@ -212,8 +265,8 @@ class DrcomClient(
         .header("Accept", "*/*")
         .build()
 
-    private fun executeJsonp(request: Request): Result<JsonObject> = try {
-        client.newCall(request).execute().use { response ->
+    private suspend fun executeJsonp(request: Request): Result<JsonObject> = try {
+        client.executeCancellable(request) { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 Result.failure(IOException("HTTP ${response.code}"))
@@ -221,37 +274,36 @@ class DrcomClient(
                 runCatching { parseJsonp(body) }
             }
         }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (error: Exception) {
         Result.failure(error)
     }
 
-    private fun executeOperation(request: Request, operation: String): Result<Unit> = try {
-        client.newCall(request).execute().use { response ->
+    private suspend fun executeOperation(request: Request, operation: String): Result<Unit> = try {
+        client.executeCancellable(request) { response ->
             val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 Result.failure(IOException("$operation HTTP ${response.code}"))
-            } else if (body.isBlank()) {
-                Result.success(Unit)
             } else {
-                val json = runCatching { parseJsonp(body) }.getOrNull()
-                val result = json?.intValue("result")
-                if (result == null || result == 1) {
+                val json = parseJsonp(body)
+                val result = json.stringValue("result")
+                if (result == "1" || result == "ok") {
                     Result.success(Unit)
                 } else {
-                    val message = json?.stringValue("msg") ?: json?.stringValue("msga") ?: "服务端拒绝请求"
+                    val message = json.stringValue("msg") ?: json.stringValue("msga") ?: "响应未确认成功"
                     Result.failure(IOException("${operation}失败: $message"))
                 }
             }
         }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (error: Exception) {
         Result.failure(error)
     }
 
     private fun JsonObject.stringValue(name: String): String? =
-        get(name)?.takeUnless { it.isJsonNull }?.asString?.takeIf { it.isNotBlank() }
-
-    private fun JsonObject.intValue(name: String): Int? =
-        get(name)?.takeUnless { it.isJsonNull }?.asString?.toIntOrNull()
+        get(name)?.takeIf { it.isJsonPrimitive }?.asString?.takeIf { it.isNotBlank() }
 
     private fun randomCallback(): String = "dr${Random.nextInt(1000, 10_000)}"
     private fun randomNonce(): String = Random.nextInt(1000, 20_000).toString()
@@ -259,6 +311,7 @@ class DrcomClient(
     companion object {
         private const val MIN_LOGIN_INTERVAL_SECONDS = 3
         private val RATE_LIMIT_REGEX = Regex("error5\\s+waitsec\\s*<(\\d+)", RegexOption.IGNORE_CASE)
+        private val JSONP_CALLBACK_REGEX = Regex("[A-Za-z_$][A-Za-z0-9_$]*")
         private const val USER_AGENT =
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                 "(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"

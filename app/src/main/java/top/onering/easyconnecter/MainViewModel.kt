@@ -5,6 +5,8 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -14,6 +16,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import top.onering.easyconnecter.data.RuntimeStatus
 import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.Campus
@@ -58,6 +62,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     private val _events = MutableSharedFlow<MainUiEvent>(extraBufferCapacity = 4)
     private var normalModeJob: Job? = null
+    private val connectionChangeMutex = Mutex()
     private var autoClose = true
 
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
@@ -66,6 +71,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     init {
         observeRepositories()
         when {
+            container.coordinator.connectionsPaused -> Unit
             container.accounts.accounts.value.isEmpty() -> {
                 if (container.config.keepAlive.value) {
                     container.logs.add("服务模式已恢复，等待导入账号")
@@ -79,22 +85,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setKeepAlive(enabled: Boolean) {
         autoClose = false
         viewModelScope.launch {
-            container.config.setKeepAlive(enabled)
-            if (enabled && container.accounts.accounts.value.isEmpty()) {
-                normalModeJob?.cancel()
-                KeepAliveService.stop(getApplication())
-                container.logs.add("服务模式已记住，等待导入账号")
-                _events.emit(MainUiEvent.Toast("服务模式已记住，导入账号后自动启用"))
-                return@launch
-            }
-            if (enabled) {
-                normalModeJob?.cancel()
-                KeepAliveService.start(getApplication())
-                container.logs.add("服务模式已开启")
-            } else {
-                KeepAliveService.stop(getApplication())
-                container.logs.add("服务模式已关闭")
-                startNormalMode()
+            connectionChangeMutex.withLock {
+                pauseConnectionWork()
+                container.config.setKeepAlive(enabled)
+                if (enabled && container.accounts.accounts.value.isEmpty()) {
+                    container.logs.add("服务模式已记住，等待导入账号")
+                    _events.emit(MainUiEvent.Toast("服务模式已记住，导入账号后自动启用"))
+                    return@withLock
+                }
+                resumeConnectionWork()
+                container.logs.add(if (enabled) "服务模式已开启" else "服务模式已关闭")
             }
         }
     }
@@ -105,50 +105,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectInitialCampus(campus: Campus) {
-        viewModelScope.launch { container.coordinator.changeCampus(campus) }
+        viewModelScope.launch {
+            try {
+                container.coordinator.changeCampus(campus)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportOperationFailure("设置校区", error)
+            }
+        }
     }
 
     fun importCsv(uri: Uri) {
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true) }
-            val result = try {
-                getApplication<Application>().contentResolver.openInputStream(uri)?.use { stream ->
+            try {
+                val result = getApplication<Application>().contentResolver.openInputStream(uri)?.use { stream ->
                     container.accounts.importCsv(stream)
                 }
-            } catch (error: Exception) {
-                null
-            }
 
-            when {
-                result == null -> _events.emit(MainUiEvent.Toast("无法读取所选文件"))
-                result.fatalError != null -> _events.emit(MainUiEvent.Toast(result.fatalError))
-                result.accounts.isEmpty() -> _events.emit(MainUiEvent.Toast("未解析出有效账号"))
-                else -> {
-                    container.coordinator.replaceAccounts(result.accounts)
-                    val warningText = if (result.warnings.isEmpty()) "" else "，跳过 ${result.warnings.size} 行"
-                    container.logs.add("成功导入 ${result.accounts.size} 个账号$warningText")
-                    _events.emit(MainUiEvent.Toast("成功导入 ${result.accounts.size} 个账号$warningText"))
-                    if (container.config.keepAlive.value) {
-                        KeepAliveService.start(getApplication())
-                    } else {
-                        startNormalMode()
+                when {
+                    result == null -> _events.emit(MainUiEvent.Toast("无法读取所选文件"))
+                    result.fatalError != null -> _events.emit(MainUiEvent.Toast(result.fatalError))
+                    result.accounts.isEmpty() -> _events.emit(MainUiEvent.Toast("未解析出有效账号"))
+                    else -> {
+                        connectionChangeMutex.withLock {
+                            pauseConnectionWork()
+                            container.coordinator.replaceAccounts(result.accounts)
+                            val warningText = if (result.warnings.isEmpty()) "" else "，跳过 ${result.warnings.size} 行"
+                            container.logs.add("成功导入 ${result.accounts.size} 个账号$warningText")
+                            _events.emit(MainUiEvent.Toast("成功导入 ${result.accounts.size} 个账号$warningText"))
+                            resumeConnectionWork()
+                        }
                     }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportOperationFailure("导入账号", error)
+            } finally {
+                _uiState.update { it.copy(isBusy = false) }
             }
-            _uiState.update { it.copy(isBusy = false) }
         }
     }
 
     fun deleteAccount(index: Int) {
         autoClose = false
         viewModelScope.launch {
-            val removed = container.coordinator.removeAccount(index) ?: return@launch
-            container.logs.add("手动删除账号: ${removed.name.ifBlank { removed.studentId }}")
-            if (container.accounts.accounts.value.isEmpty()) {
-                KeepAliveService.stop(getApplication())
-                if (container.config.keepAlive.value) {
-                    container.logs.add("没有可用账号，服务已暂停，保留服务模式开关")
+            try {
+                val removed = container.coordinator.removeAccount(index) ?: return@launch
+                container.logs.add("手动删除账号: ${removed.name.ifBlank { removed.studentId }}")
+                if (container.accounts.accounts.value.isEmpty()) {
+                    KeepAliveService.stop(getApplication())
+                    if (container.config.keepAlive.value) {
+                        container.logs.add("没有可用账号，服务已暂停，保留服务模式开关")
+                    }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportOperationFailure("删除账号", error)
             }
         }
     }
@@ -207,6 +223,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun restartAfterLogout() {
         container.logs.add("正在重启应用并恢复已记忆的服务模式")
         _uiState.update { it.copy(restartAfterLogoutMessage = null) }
+        container.coordinator.resumeConnections()
         viewModelScope.launch { _events.emit(MainUiEvent.RestartApp) }
     }
 
@@ -217,47 +234,77 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun confirmCampusChange() {
         autoClose = false
         viewModelScope.launch {
-            _uiState.update { it.copy(showCampusDialog = false, isBusy = true) }
-            val wasKeepAlive = container.config.keepAlive.value
-            normalModeJob?.cancel()
-            KeepAliveService.stop(getApplication())
-            val newCampus = if (container.config.campus.value == Campus.CHENGBEI) {
-                Campus.ZHONGSHAN
-            } else {
-                Campus.CHENGBEI
+            connectionChangeMutex.withLock {
+                _uiState.update { it.copy(showCampusDialog = false, isBusy = true) }
+                try {
+                    pauseConnectionWork()
+                    val newCampus = if (container.config.campus.value == Campus.CHENGBEI) {
+                        Campus.ZHONGSHAN
+                    } else {
+                        Campus.CHENGBEI
+                    }
+                    container.coordinator.changeCampus(newCampus)
+                    container.logs.add("已切换至${newCampus.displayName}校区")
+                    resumeConnectionWork()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    reportOperationFailure("切换校区", error)
+                } finally {
+                    _uiState.update { it.copy(isBusy = false) }
+                }
             }
-            container.coordinator.changeCampus(newCampus)
-            container.logs.add("已切换至${newCampus.displayName}校区")
-            if (wasKeepAlive) KeepAliveService.start(getApplication()) else startNormalMode()
-            _uiState.update { it.copy(isBusy = false) }
         }
     }
 
     fun confirmLogout() {
         autoClose = false
         viewModelScope.launch {
-            _uiState.update { it.copy(showLogoutDialog = false, isBusy = true) }
-            normalModeJob?.cancel()
-            KeepAliveService.stop(getApplication())
-            val result = container.coordinator.logoutAndUnbind()
-            if (shouldPromptRestartAfterLogout(result)) {
-                container.logs.add("校园网已注销，等待用户选择是否重启")
-                _uiState.update {
-                    it.copy(
-                        isBusy = false,
-                        showFireworks = false,
-                        restartAfterLogoutMessage = result.message
-                    )
+            connectionChangeMutex.withLock {
+                _uiState.update { it.copy(showLogoutDialog = false, isBusy = true) }
+                pauseConnectionWork()
+                val result = container.coordinator.logoutAndUnbind()
+                if (shouldPromptRestartAfterLogout(result)) {
+                    container.logs.add("校园网已注销，等待用户选择是否重启")
+                    _uiState.update {
+                        it.copy(
+                            isBusy = false,
+                            showFireworks = false,
+                            restartAfterLogoutMessage = result.message
+                        )
+                    }
+                } else {
+                    _events.emit(MainUiEvent.Toast(result.message))
+                    _uiState.update { it.copy(isBusy = false, showFireworks = false) }
                 }
-            } else {
-                _events.emit(MainUiEvent.Toast(result.message))
-                _uiState.update { it.copy(isBusy = false, showFireworks = false) }
             }
         }
     }
 
+    private suspend fun pauseConnectionWork() {
+        container.coordinator.pauseConnections()
+        normalModeJob?.cancelAndJoin()
+        normalModeJob = null
+        KeepAliveService.stopAndAwait(getApplication())
+        container.coordinator.awaitIdle()
+    }
+
+    private suspend fun reportOperationFailure(operation: String, error: Exception) {
+        val pauseMessage = if (container.coordinator.connectionsPaused) "；连接保持暂停，请处理后重试或重启应用" else ""
+        val reason = error.cause?.message ?: error.message ?: "未知错误"
+        val message = "${operation}失败: $reason$pauseMessage"
+        container.logs.add("❌ $message")
+        _events.emit(MainUiEvent.Toast(message))
+    }
+
+    private fun resumeConnectionWork() {
+        container.coordinator.resumeConnections()
+        if (container.config.keepAlive.value) KeepAliveService.start(getApplication()) else startNormalMode()
+    }
+
     private fun startNormalMode() {
-        if (normalModeJob?.isActive == true || container.accounts.accounts.value.isEmpty()) return
+        if (container.coordinator.connectionsPaused || normalModeJob?.isActive == true ||
+            container.accounts.accounts.value.isEmpty()) return
         normalModeJob = viewModelScope.launch {
             while (!container.config.keepAlive.value && container.accounts.accounts.value.isNotEmpty()) {
                 when (val outcome = container.coordinator.connectOnce()) {

@@ -13,12 +13,14 @@ import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import top.onering.easyconnecter.MainActivity
 import top.onering.easyconnecter.R
 import top.onering.easyconnecter.appContainer
@@ -29,25 +31,37 @@ class KeepAliveService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var monitorJob: Job? = null
     private var lastAccountName: String? = null
+    private val destroyed = CompletableDeferred<Unit>()
+    private var stopping = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        runningInstance = this
         createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startInForeground("正在启动校园网监测")
         if (intent?.action == ACTION_STOP) {
-            serviceScope.launch {
-                appContainer.config.setKeepAlive(false)
-                stopMonitoring()
+            if (!stopping) {
+                stopping = true
+                val previousJob = monitorJob
+                previousJob?.cancel()
+                serviceScope.launch {
+                    previousJob?.join()
+                    appContainer.config.setKeepAlive(false)
+                    stopMonitoring()
+                }
             }
             return START_NOT_STICKY
         }
 
-        if (!appContainer.config.keepAlive.value || appContainer.accounts.accounts.value.isEmpty()) {
+        if (stopping) return START_NOT_STICKY
+
+        if (appContainer.coordinator.connectionsPaused || !appContainer.config.keepAlive.value ||
+            appContainer.accounts.accounts.value.isEmpty()) {
             stopMonitoring()
             return START_NOT_STICKY
         }
@@ -60,6 +74,8 @@ class KeepAliveService : Service() {
         monitorJob?.cancel()
         appContainer.runtime.update(RuntimeStatus(serviceRunning = false, message = "服务模式已停止"))
         serviceScope.cancel()
+        if (runningInstance === this) runningInstance = null
+        destroyed.complete(Unit)
         super.onDestroy()
     }
 
@@ -90,6 +106,7 @@ class KeepAliveService : Service() {
     }
 
     private fun stopMonitoring() {
+        stopping = true
         monitorJob?.cancel()
         monitorJob = null
         appContainer.runtime.update(RuntimeStatus(serviceRunning = false, message = "服务模式已停止"))
@@ -169,6 +186,7 @@ class KeepAliveService : Service() {
     }
 
     companion object {
+        private var runningInstance: KeepAliveService? = null
         private const val CHANNEL_ID = "campus_keep_alive"
         private const val NOTIFICATION_ID = 1001
         private const val ACTION_START = "top.onering.easyconnecter.action.START_KEEP_ALIVE"
@@ -180,7 +198,17 @@ class KeepAliveService : Service() {
         }
 
         fun stop(context: Context) {
+            context.appContainer.coordinator.pauseConnections()
             context.stopService(Intent(context, KeepAliveService::class.java))
+        }
+
+        suspend fun stopAndAwait(context: Context) = withContext(Dispatchers.Main.immediate) {
+            val previous = runningInstance
+            val previousJob = previous?.monitorJob
+            previousJob?.cancel()
+            stop(context)
+            previousJob?.join()
+            previous?.destroyed?.await()
         }
     }
 }
