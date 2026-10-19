@@ -25,12 +25,13 @@ import top.onering.easyconnecter.MainActivity
 import top.onering.easyconnecter.R
 import top.onering.easyconnecter.appContainer
 import top.onering.easyconnecter.data.RuntimeStatus
+import top.onering.easyconnecter.data.ConnectionPhase
+import top.onering.easyconnecter.data.toRuntimeStatus
 import top.onering.easyconnecter.model.ConnectionOutcome
 
 class KeepAliveService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var monitorJob: Job? = null
-    private var lastAccountName: String? = null
     private val destroyed = CompletableDeferred<Unit>()
     private var stopping = false
 
@@ -51,8 +52,16 @@ class KeepAliveService : Service() {
                 previousJob?.cancel()
                 serviceScope.launch {
                     previousJob?.join()
-                    appContainer.config.setKeepAlive(false)
-                    stopMonitoring()
+                    try {
+                        appContainer.config.setKeepAlive(false)
+                        stopMonitoring()
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        val message = "保存服务模式失败: ${error.message ?: "未知错误"}"
+                        appContainer.logs.add("❌ $message")
+                        stopMonitoring(RuntimeStatus(message = message, phase = ConnectionPhase.PAUSED))
+                    }
                 }
             }
             return START_NOT_STICKY
@@ -60,7 +69,7 @@ class KeepAliveService : Service() {
 
         if (stopping) return START_NOT_STICKY
 
-        if (appContainer.coordinator.connectionsPaused || !appContainer.config.keepAlive.value ||
+        if (!appContainer.config.onboardingCompleted.value || appContainer.coordinator.connectionsPaused || !appContainer.config.keepAlive.value ||
             appContainer.accounts.accounts.value.isEmpty()) {
             stopMonitoring()
             return START_NOT_STICKY
@@ -72,7 +81,7 @@ class KeepAliveService : Service() {
 
     override fun onDestroy() {
         monitorJob?.cancel()
-        appContainer.runtime.update(RuntimeStatus(serviceRunning = false, message = "服务模式已停止"))
+        appContainer.runtime.update(stoppedRuntimeStatus())
         serviceScope.cancel()
         if (runningInstance === this) runningInstance = null
         destroyed.complete(Unit)
@@ -80,11 +89,22 @@ class KeepAliveService : Service() {
     }
 
     private fun startMonitoring() {
-        appContainer.runtime.update(RuntimeStatus(serviceRunning = true, message = "正在监测校园网"))
+        appContainer.runtime.update(
+            RuntimeStatus(serviceRunning = true, message = "正在检查校园网连接", phase = ConnectionPhase.CHECKING)
+        )
         monitorJob = serviceScope.launch {
             try {
-                appContainer.coordinator.runKeepAlive { outcome ->
-                    val status = outcome.toRuntimeStatus()
+                appContainer.config.ensureOnboardingInitialized()
+                appContainer.coordinator.runKeepAlive(onChecking = {
+                    val status = RuntimeStatus(
+                        serviceRunning = true,
+                        message = "正在检查校园网连接",
+                        phase = ConnectionPhase.CHECKING
+                    )
+                    appContainer.runtime.update(status)
+                    updateNotification(status.message, status.accountName)
+                }) { outcome ->
+                    val status = outcome.toRuntimeStatus(serviceRunning = true)
                     appContainer.runtime.update(status)
                     updateNotification(status.message, status.accountName)
                     if (outcome == ConnectionOutcome.NoAccounts) {
@@ -96,7 +116,9 @@ class KeepAliveService : Service() {
             } catch (error: Exception) {
                 val message = "服务异常: ${error.message ?: "未知错误"}"
                 appContainer.logs.add("❌ $message")
-                appContainer.runtime.update(RuntimeStatus(serviceRunning = false, message = message))
+                appContainer.runtime.update(RuntimeStatus(message = message, phase = ConnectionPhase.PAUSED))
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             } finally {
                 if (!appContainer.config.keepAlive.value || appContainer.accounts.accounts.value.isEmpty()) {
                     stopSelf()
@@ -105,32 +127,26 @@ class KeepAliveService : Service() {
         }
     }
 
-    private fun stopMonitoring() {
+    private fun stopMonitoring(status: RuntimeStatus = stoppedRuntimeStatus()) {
         stopping = true
         monitorJob?.cancel()
         monitorJob = null
-        appContainer.runtime.update(RuntimeStatus(serviceRunning = false, message = "服务模式已停止"))
+        appContainer.runtime.update(status)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
-    private fun ConnectionOutcome.toRuntimeStatus(): RuntimeStatus {
-        if (this is ConnectionOutcome.Connected && account != null) {
-            lastAccountName = account.name.ifBlank { account.studentId }
-        }
-        return when (this) {
-            is ConnectionOutcome.Connected -> RuntimeStatus(
-                serviceRunning = true,
-                message = if (alreadyConnected) "网络正常，持续监测中" else "${carrier?.displayName.orEmpty()}登录成功",
-                accountName = lastAccountName
-            )
-            is ConnectionOutcome.AccountRemoved -> RuntimeStatus(
-                true,
-                "错误账号已移除",
-                account.name.ifBlank { account.studentId }
-            )
-            is ConnectionOutcome.Failed -> RuntimeStatus(true, message, lastAccountName)
-            ConnectionOutcome.NoAccounts -> RuntimeStatus(false, "没有可用账号", lastAccountName)
+    private fun stoppedRuntimeStatus(): RuntimeStatus {
+        val previous = appContainer.runtime.status.value
+        return when {
+            appContainer.accounts.accounts.value.isEmpty() ->
+                ConnectionOutcome.NoAccounts.toRuntimeStatus(serviceRunning = false)
+            !appContainer.config.onboardingCompleted.value ->
+                RuntimeStatus(message = "请完成首次设置后开始连接", phase = ConnectionPhase.PAUSED)
+            !previous.serviceRunning && previous.phase == ConnectionPhase.PAUSED -> previous
+            appContainer.coordinator.connectionsPaused ->
+                RuntimeStatus(message = "连接已暂停", phase = ConnectionPhase.PAUSED)
+            else -> RuntimeStatus(message = "服务模式已停止", phase = ConnectionPhase.IDLE)
         }
     }
 

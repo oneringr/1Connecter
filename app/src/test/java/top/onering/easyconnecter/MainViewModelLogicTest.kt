@@ -23,6 +23,27 @@ class MainViewModelLogicTest {
     }
 
     @Test
+    fun unfinishedOnboardingAndUserInteractionIndependentlyPreventAutomaticExit() {
+        val outcome = ConnectionOutcome.Connected(null, null, alreadyConnected = false)
+
+        assertFalse(shouldAutoCloseAfterConnection(
+            outcome, autoCloseEnabled = true, sessionAllowsAutoClose = true, onboardingCompleted = false
+        ))
+        assertFalse(shouldAutoCloseAfterConnection(
+            outcome, autoCloseEnabled = true, sessionAllowsAutoClose = false, onboardingCompleted = true
+        ))
+        assertTrue(shouldAutoCloseAfterConnection(
+            outcome, autoCloseEnabled = true, sessionAllowsAutoClose = true, onboardingCompleted = true
+        ))
+    }
+
+    @Test
+    fun failedAndEmptyAccountOutcomesNeverCloseTheApp() {
+        assertFalse(shouldAutoCloseAfterConnection(ConnectionOutcome.Failed("离线"), autoCloseEnabled = true))
+        assertFalse(shouldAutoCloseAfterConnection(ConnectionOutcome.NoAccounts, autoCloseEnabled = true))
+    }
+
+    @Test
     fun restartPromptOnlyAppearsAfterConfirmedLogout() {
         val successful = LogoutOutcome(
             sessionLoggedOut = true,

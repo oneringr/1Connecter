@@ -22,7 +22,7 @@ class EasyConnecterApplication : Application() {
 
 class AppContainer(context: Context) {
     val accounts = AccountRepository(context)
-    val config = ConfigRepository(context)
+    val config = ConfigRepository(context, hasExistingAccounts = accounts.accounts.value.isNotEmpty())
     val logs = LogRepository()
     val logExporter = SharedLogExporter(context)
     val runtime = RuntimeRepository()

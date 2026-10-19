@@ -208,11 +208,15 @@ class ConnectionCoordinator(
         }
     }
 
-    suspend fun runKeepAlive(onOutcome: suspend (ConnectionOutcome) -> Unit = {}) {
+    suspend fun runKeepAlive(
+        onChecking: suspend () -> Unit = {},
+        onOutcome: suspend (ConnectionOutcome) -> Unit = {}
+    ) {
         while (currentCoroutineContext().isActive && configRepository.keepAlive.value) {
             val outcome = if (accountRepository.accounts.value.isEmpty()) {
                 ConnectionOutcome.NoAccounts
             } else {
+                onChecking()
                 connectOnce()
             }
             onOutcome(outcome)

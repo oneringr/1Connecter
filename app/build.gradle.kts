@@ -1,19 +1,18 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
 }
 
 android {
     namespace = "top.onering.easyconnecter"
-    compileSdk = 34
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "top.onering.easyconnecter"
         minSdk = 26
         targetSdk = 34
-        versionCode = 107
-        versionName = "1.7"
+        versionCode = 200
+        versionName = "2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -31,9 +30,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11
     }
-    kotlinOptions {
-        jvmTarget = "11"
-    }
     buildFeatures {
         buildConfig = true
         compose = true
@@ -48,7 +44,7 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
-    implementation(libs.androidx.compose.material3)
+    implementation(libs.miuix.ui)
     implementation(libs.okhttp)
     implementation(libs.gson)
     implementation(libs.kotlinx.coroutines.android)

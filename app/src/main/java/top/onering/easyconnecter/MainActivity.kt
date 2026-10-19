@@ -3,30 +3,59 @@ package top.onering.easyconnecter
 import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Intent
+import android.content.ActivityNotFoundException
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.viewmodel.compose.viewModel
 import top.onering.easyconnecter.ui.MainScreen
+import top.onering.easyconnecter.data.PROJECT_URL
 import top.onering.easyconnecter.ui.theme._1ConnecterTheme
+import top.onering.easyconnecter.ui.theme.LocalConnectorPalette
 
 class MainActivity : ComponentActivity() {
+    private val mainViewModel: MainViewModel by viewModels()
+
+    override fun onUserInteraction() {
+        super.onUserInteraction()
+        mainViewModel.markUserInteraction()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            _1ConnecterTheme {
-                val viewModel: MainViewModel = viewModel()
-                val state by viewModel.uiState.collectAsState()
+            val viewModel = mainViewModel
+            val state by viewModel.uiState.collectAsState()
+            _1ConnecterTheme(themeMode = state.themeMode) {
+                val palette = LocalConnectorPalette.current
+                val barColor = palette.background.toArgb()
+                LaunchedEffect(palette.dark, barColor) {
+                    enableEdgeToEdge(
+                        statusBarStyle = if (palette.dark) {
+                            SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                        } else {
+                            SystemBarStyle.light(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT)
+                        },
+                        navigationBarStyle = if (palette.dark) {
+                            SystemBarStyle.dark(barColor)
+                        } else {
+                            SystemBarStyle.light(barColor, barColor)
+                        }
+                    )
+                }
 
                 val csvLauncher = rememberLauncherForActivityResult(
                     ActivityResultContracts.GetContent()
@@ -104,6 +133,13 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onToggleAutoScroll = viewModel::setAutoScrollLogs,
+                    onSetAutoClose = viewModel::setAutoClose,
+                    onCompleteOnboarding = viewModel::completeOnboarding,
+                    onOpenProject = { openWebPage(PROJECT_URL) },
+                    onCheckForUpdate = viewModel::checkForUpdate,
+                    onOpenRelease = ::openWebPage,
+                    onSetThemeMode = viewModel::setThemeMode,
+                    onUserInteraction = viewModel::markUserInteraction,
                     onShowAccounts = viewModel::showAccountManager,
                     onDismissAccounts = viewModel::dismissAccountManager,
                     onDeleteAccount = viewModel::deleteAccount,
@@ -132,6 +168,14 @@ class MainActivity : ComponentActivity() {
                     }
                 )
             }
+        }
+    }
+
+    private fun openWebPage(url: String) {
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(this, "未找到可打开网页的浏览器", Toast.LENGTH_LONG).show()
         }
     }
 

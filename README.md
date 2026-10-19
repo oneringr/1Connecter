@@ -44,11 +44,19 @@
 - 保留可正常上网的已有会话；遇到 `clientip online` 且外网不可用时自动清理、等待并重试。
 - 通过常驻通知提供持续监测，支持主动注销校园网和导出诊断日志。
 
+### 2.0 更新
+
+- 使用 Miuix 重写扁平化界面，分为首页、账号、日志和设置，支持主题切换与底部导航过渡动画。
+- 增加两步首次引导：导入 CSV 后选择校区及自动关闭设置，完成后才启动连接；已有账号的用户升级时保留设置。
+- 账号列表支持折叠及姓名、学号搜索；日志布局更紧凑，按钮按压反馈覆盖整个可点击区域。
+- 关于页支持项目链接和手动检查 GitHub 正式版本；补充开关名称与选中状态的无障碍信息。
+- 将账号、登录偏好和待恢复会话排除在系统云备份与设备迁移之外；更换设备请使用 CSV 导出、导入。
+
 ### 技术栈
 
-Kotlin · Jetpack Compose / Material 3 · Kotlin Coroutines · OkHttp · Gson · Apache Commons CSV · Konfetti
+Kotlin · Jetpack Compose / Miuix · Kotlin Coroutines · OkHttp · Gson · Apache Commons CSV · Konfetti
 
-Android 配置：`minSdk 26`、`compileSdk 34`、`targetSdk 34`。构建使用 Gradle 8.13、Android Gradle Plugin 8.13.2。
+Android 配置：`minSdk 26`、`compileSdk 37`、`targetSdk 34`。构建使用 Gradle 9.7.1、Android Gradle Plugin 9.4.1、Kotlin 2.4.20 和 Miuix 0.9.4。界面参考 HuaweiPods 的扁平化设计，使用实色分组卡片和贴底导航，支持浅色、深色与跟随系统，兼容 Android 9。
 
 <a id="getting-started"></a>
 
@@ -61,7 +69,7 @@ Android 配置：`minSdk 26`、`compileSdk 34`、`targetSdk 34`。构建使用 G
 从源码构建另需：
 
 - JDK 17 或与当前 Gradle / AGP 兼容的更高版本。
-- Android SDK Platform 34，可用 Android Studio 安装并打开项目。
+- Android SDK Platform 37，可用 Android Studio 安装并打开项目。
 - 配置 `ANDROID_HOME`，或在本地 `local.properties` 中设置 `sdk.dir`。
 
 项目生成的 Java / Kotlin 字节码目标为 Java 11；运行构建工具仍需要 JDK 17 及以上。
@@ -95,12 +103,29 @@ APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，也可在 Android Studi
 
 ## 使用说明
 
+### 界面导航
+
+- **首页**：查看网络状态、服务运行状态和校区，进入账号导入与运行日志。
+- **账号**：导入或导出 CSV；展开“全部账号”后浏览列表，按姓名或学号搜索。候选标记表示下一轮使用的位置，不代表当前在线账号。
+- **日志**：以紧凑间距查看运行过程，控制自动滚动并导出日志。
+- **设置**：调整服务模式、自动关闭、校区和主题，注销校园网；在“关于”中打开项目主页或手动检查新版本。
+
+界面将服务模式开关、实际服务运行和连接暂停分别展示；开关开启不代表当前正在保活或已经联网。
+
+底部导航切页使用短距离滑动与淡入淡出动画，并保留各页滚动位置。账号菜单的展开状态和搜索关键词也会在切页时保留。
+
 ### 首次连接
 
 1. 连接校园网络或接入校园网的路由器 Wi-Fi。
-2. 打开应用，选择城北或忠山校区。
-3. 导入账号 CSV，应用随即检测网络并按需登录。
-4. 需要持续监测时，开启“服务模式”。
+2. 首次打开应用，在引导第一步导入账号 CSV；成功导入后点击“下一步”。
+3. 第二步选择城北或忠山校区，设置“连接成功后自动关闭”（默认开启），再点击“开始使用”。完成引导后才会检测网络并按需登录。
+4. 需要持续监测时，在设置中开启“服务模式”。
+
+引导未完成时退出应用，下次会继续；已导入账号无需重复导入。已有账号的老用户升级后直接进入首页，保留原有设置。
+
+### 项目与更新
+
+打开“设置 → 关于”可跳转项目主页。点击“检查更新”后查询 GitHub 最新正式 Release；有新版本时显示“有新版本，点击跳转 Release”，再次点击打开对应发布页。检查失败可重试，应用不会自动下载或安装更新。
 
 ### CSV 账号配置
 
@@ -122,10 +147,12 @@ APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，也可在 Android Studi
 
 | 模式 | 行为 |
 | --- | --- |
-| 普通模式 | 打开应用后检测并尝试连接；本次实际登录成功后延迟 3 秒自动关闭。用户操作界面会取消自动关闭，启动时已联网也会保持界面打开。 |
+| 普通模式 | 打开应用后检测并尝试连接；“连接成功后自动关闭”默认开启，本次实际登录成功后延迟 3 秒关闭界面。可在设置中关闭；用户操作界面会取消本次自动关闭，启动时已联网也会保持界面打开。 |
 | 服务模式 | 使用带常驻通知的前台服务，联网时约每 60 秒检查一次，断线时进入恢复流程；可在通知中“停止保活”。 |
 
 服务模式开关会被记住，重新打开应用时按该设置恢复。账号列表为空时暂停服务，导入有效账号后可继续；主动注销只暂停连接，不清除开关选择。通知中的“停止保活”会关闭服务模式，之后重新打开应用仍可进行普通模式登录。
+
+自动关闭规则与开关已纳入首次引导第二步，不再单独弹窗提示。完成引导属于本次用户操作，当前界面会保持打开；后续启动按保存的自动关闭设置运行。主题选择同样会保存。
 
 Android 13 及以上会请求通知权限，拒绝后前台服务仍可运行，但通知可能仅在系统任务管理器中显示。系统的后台限制可能结束进程；划掉最近任务能否保留服务取决于设备。设备重启或强行停止后，需要重新打开应用。
 
@@ -157,6 +184,8 @@ Android 8–9 首次导出日志需要存储权限，Android 10 及以上无需�
 
 账号、轮换位置、校区、服务开关和运营商偏好分别保存在应用私有目录的 `accounts.json`、`current_index.txt`、`campus_config.txt`、`keep_alive_config.txt`、`login_preferences.json` 中；`pending_recovery.json` 独立保存尚未完成的恢复会话。账号信息未额外加密；导出的 CSV 和日志也可能包含个人信息。为适配网关，应用对上述两个校区地址使用明文 HTTP。
 
+界面偏好保存在同一私有目录的 `auto_close_config.txt` 和 `theme_mode_config.txt`，首次引导完成状态保存在 `onboarding_completed.txt`。系统备份与设备迁移排除 `accounts.json`、`login_preferences.json` 和 `pending_recovery.json`；账号跨设备转移需手动导出、导入 CSV。
+
 项目依赖当前 Dr.COM 接口与参数，迁移到其他学校通常需要调整代码。两个 HTTPS 探测站点同时不可达时仍可能误判外网状态；忠山校区的 `:801/eportal` 解绑接口按同构路径实现，尚未实测。
 
 应用的 HTTPS 探测和校园网请求使用系统默认网络。如果系统将默认网络切换到蜂窝数据，探测成功可能掩盖校园网断网。本次实机验证使用 Wi-Fi 默认网络，自动化恢复测试还将测试进程绑定到 Wi-Fi；蜂窝数据接管默认网络的场景尚未验证。
@@ -170,6 +199,7 @@ Android 8–9 首次导出日志需要存储权限，Android 10 及以上无需�
 - [x] CSV 账号导入、管理与导出。
 - [x] 记忆运营商、前台保活和日志导出。
 - [x] 基于会话状态的 `clientip online` 恢复及请求取消。
+- [x] Miuix 四页界面、首次引导、账号搜索、主题选择与版本检查。
 - [ ] 补充忠山校区真实网络验证。
 - [ ] 收集自然持续断网场景，完善恢复回归测试。
 
@@ -188,6 +218,8 @@ Android 8–9 首次导出日志需要存储权限，Android 10 及以上无需�
 ```
 
 界面与生命周期测试位于 `app/src/androidTest`。真实校园网恢复测试需要明确启用 `liveCampus=true`，会执行注销和重新登录；请仅在允许短暂断网、具备有效测试账号的校园网设备上运行。
+
+2.0 发布验证：91 项 JVM 单元测试、18 项 Android 14 模拟器界面与配置测试通过；Debug / Release 构建及 lint 完成，均为 0 错误、31 条警告，主要涉及依赖版本建议、图标及未使用资源。签名 Release 已验证从 1.7 覆盖升级并保留校区、服务设置。Android 9 真机完成首次引导、重启恢复、链接及按压反馈检查，最终 2.0 调试包完成覆盖安装和启动验证；本轮未重跑真实校园网注销与恢复测试。
 
 主要代码入口：
 
@@ -217,6 +249,7 @@ Android 8–9 首次导出日志需要存储权限，Android 10 及以上无需�
 
 - [Best-README-Template](https://github.com/othneildrew/Best-README-Template)：README 结构参考。
 - Android Jetpack、Kotlin、OkHttp、Gson、Apache Commons CSV 与 Konfetti 等开源项目。
+- [Miuix](https://github.com/compose-miuix-ui/miuix)：Compose 界面组件；[HuaweiPods](https://github.com/Nshpiter/HuaweiPods)：扁平化页面、分组卡片与导航设计参考。
 - 提供校园网测试环境、问题反馈和复现信息的用户。
 
 [返回顶部](#readme-top)

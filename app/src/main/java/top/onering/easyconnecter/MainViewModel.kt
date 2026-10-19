@@ -19,10 +19,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import top.onering.easyconnecter.data.RuntimeStatus
+import top.onering.easyconnecter.data.ReleaseChecker
+import top.onering.easyconnecter.data.ReleaseCheckResult
+import top.onering.easyconnecter.data.ConnectionPhase
+import top.onering.easyconnecter.data.toRuntimeStatus
 import top.onering.easyconnecter.model.Account
 import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.ConnectionOutcome
 import top.onering.easyconnecter.model.LogoutOutcome
+import top.onering.easyconnecter.model.ThemeMode
 import top.onering.easyconnecter.service.KeepAliveService
 
 data class MainUiState(
@@ -31,11 +36,16 @@ data class MainUiState(
     val currentIndex: Int = 0,
     val campus: Campus = Campus.CHENGBEI,
     val keepAlive: Boolean = false,
+    val autoCloseEnabled: Boolean = true,
+    val showOnboarding: Boolean = false,
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val autoScrollLogs: Boolean = true,
     val runtimeStatus: RuntimeStatus = RuntimeStatus(),
     val showAccountManager: Boolean = false,
     val showCampusDialog: Boolean = false,
     val showAboutDialog: Boolean = false,
+    val isCheckingUpdate: Boolean = false,
+    val releaseCheckResult: ReleaseCheckResult? = null,
     val showLogoutDialog: Boolean = false,
     val restartAfterLogoutMessage: String? = null,
     val showFireworks: Boolean = false,
@@ -57,6 +67,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             currentIndex = container.config.currentIndex.value,
             campus = container.config.campus.value,
             keepAlive = container.config.keepAlive.value,
+            autoCloseEnabled = container.config.autoCloseEnabled.value,
+            showOnboarding = !container.config.onboardingCompleted.value,
+            themeMode = container.config.themeMode.value,
             runtimeStatus = container.runtime.status.value
         )
     )
@@ -64,21 +77,45 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var normalModeJob: Job? = null
     private val connectionChangeMutex = Mutex()
     private var autoClose = true
+    private val releaseChecker = ReleaseChecker()
+    private var updateCheckJob: Job? = null
 
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
     val events: SharedFlow<MainUiEvent> = _events.asSharedFlow()
 
     init {
         observeRepositories()
-        when {
-            container.coordinator.connectionsPaused -> Unit
-            container.accounts.accounts.value.isEmpty() -> {
-                if (container.config.keepAlive.value) {
-                    container.logs.add("服务模式已恢复，等待导入账号")
+        viewModelScope.launch {
+            connectionChangeMutex.withLock {
+                _uiState.update { it.copy(isBusy = true) }
+                try {
+                    container.config.ensureOnboardingInitialized()
+                    when {
+                        !container.config.onboardingCompleted.value -> {
+                            pauseConnectionWork()
+                            reportOnboardingPending()
+                        }
+                        container.accounts.accounts.value.isEmpty() -> {
+                            container.runtime.update(ConnectionOutcome.NoAccounts.toRuntimeStatus(serviceRunning = false))
+                            if (container.config.keepAlive.value) {
+                                container.logs.add("服务模式已恢复，等待导入账号")
+                            }
+                        }
+                        container.coordinator.connectionsPaused -> container.runtime.update(
+                            RuntimeStatus(message = "连接已暂停", phase = ConnectionPhase.PAUSED)
+                        )
+                        container.config.keepAlive.value -> KeepAliveService.start(application)
+                        else -> startNormalMode()
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    container.coordinator.pauseConnections()
+                    reportOperationFailure("初始化引导状态", error)
+                } finally {
+                    _uiState.update { it.copy(isBusy = false) }
                 }
             }
-            container.config.keepAlive.value -> KeepAliveService.start(application)
-            else -> startNormalMode()
         }
     }
 
@@ -86,15 +123,81 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autoClose = false
         viewModelScope.launch {
             connectionChangeMutex.withLock {
-                pauseConnectionWork()
-                container.config.setKeepAlive(enabled)
-                if (enabled && container.accounts.accounts.value.isEmpty()) {
-                    container.logs.add("服务模式已记住，等待导入账号")
-                    _events.emit(MainUiEvent.Toast("服务模式已记住，导入账号后自动启用"))
-                    return@withLock
+                _uiState.update { it.copy(isBusy = true) }
+                try {
+                    pauseConnectionWork()
+                    container.config.setKeepAlive(enabled)
+                    if (enabled && container.accounts.accounts.value.isEmpty()) {
+                        container.runtime.update(ConnectionOutcome.NoAccounts.toRuntimeStatus(serviceRunning = false))
+                        container.logs.add("服务模式已记住，等待导入账号")
+                        _events.emit(MainUiEvent.Toast("服务模式已记住，导入账号后自动启用"))
+                        return@withLock
+                    }
+                    resumeConnectionWork()
+                    container.logs.add(if (enabled) "服务模式已开启" else "服务模式已关闭")
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    reportOperationFailure("切换服务模式", error)
+                } finally {
+                    _uiState.update { it.copy(isBusy = false) }
                 }
-                resumeConnectionWork()
-                container.logs.add(if (enabled) "服务模式已开启" else "服务模式已关闭")
+            }
+        }
+    }
+
+    fun setAutoClose(enabled: Boolean) {
+        autoClose = false
+        viewModelScope.launch {
+            try {
+                container.config.setAutoClose(enabled)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportOperationFailure("保存自动关闭设置", error)
+            }
+        }
+    }
+
+    fun completeOnboarding(campus: Campus, autoCloseEnabled: Boolean) {
+        autoClose = false
+        viewModelScope.launch {
+            connectionChangeMutex.withLock {
+                if (container.config.onboardingCompleted.value) return@withLock
+                _uiState.update { it.copy(isBusy = true) }
+                try {
+                    pauseConnectionWork()
+                    container.config.ensureOnboardingInitialized()
+                    if (container.accounts.accounts.value.isEmpty()) {
+                        _events.emit(MainUiEvent.Toast("请先成功导入 CSV 账号配置"))
+                        reportOnboardingPending()
+                        return@withLock
+                    }
+                    container.coordinator.changeCampus(campus)
+                    container.config.setAutoClose(autoCloseEnabled)
+                    container.config.markOnboardingCompleted()
+                    container.logs.add("首次设置已完成，开始连接校园网")
+                    resumeConnectionWork()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    reportOperationFailure("完成首次设置", error)
+                } finally {
+                    _uiState.update { it.copy(isBusy = false) }
+                }
+            }
+        }
+    }
+
+    fun setThemeMode(mode: ThemeMode) {
+        autoClose = false
+        viewModelScope.launch {
+            try {
+                container.config.setThemeMode(mode)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportOperationFailure("保存主题设置", error)
             }
         }
     }
@@ -105,6 +208,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectInitialCampus(campus: Campus) {
+        autoClose = false
         viewModelScope.launch {
             try {
                 container.coordinator.changeCampus(campus)
@@ -117,6 +221,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun importCsv(uri: Uri) {
+        autoClose = false
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true) }
             try {
@@ -130,12 +235,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     result.accounts.isEmpty() -> _events.emit(MainUiEvent.Toast("未解析出有效账号"))
                     else -> {
                         connectionChangeMutex.withLock {
+                            container.config.ensureOnboardingInitialized()
                             pauseConnectionWork()
                             container.coordinator.replaceAccounts(result.accounts)
                             val warningText = if (result.warnings.isEmpty()) "" else "，跳过 ${result.warnings.size} 行"
                             container.logs.add("成功导入 ${result.accounts.size} 个账号$warningText")
                             _events.emit(MainUiEvent.Toast("成功导入 ${result.accounts.size} 个账号$warningText"))
-                            resumeConnectionWork()
+                            if (container.config.onboardingCompleted.value) {
+                                resumeConnectionWork()
+                            } else {
+                                reportOnboardingPending()
+                            }
                         }
                     }
                 }
@@ -153,10 +263,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autoClose = false
         viewModelScope.launch {
             try {
+                container.config.ensureOnboardingInitialized()
                 val removed = container.coordinator.removeAccount(index) ?: return@launch
                 container.logs.add("手动删除账号: ${removed.name.ifBlank { removed.studentId }}")
                 if (container.accounts.accounts.value.isEmpty()) {
                     KeepAliveService.stop(getApplication())
+                    container.runtime.update(ConnectionOutcome.NoAccounts.toRuntimeStatus(serviceRunning = false))
                     if (container.config.keepAlive.value) {
                         container.logs.add("没有可用账号，服务已暂停，保留服务模式开关")
                     }
@@ -188,21 +300,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         autoClose = false
         viewModelScope.launch {
             _uiState.update { it.copy(isBusy = true) }
-            val result = runCatching {
+            try {
                 val outputStream = requireNotNull(
                     getApplication<Application>().contentResolver.openOutputStream(uri, "wt")
                 ) { "无法打开保存位置" }
-                outputStream.use { container.accounts.exportCsv(it) }
+                val count = outputStream.use { container.accounts.exportCsv(it) }
+                _events.emit(MainUiEvent.Toast("已导出 $count 个账号"))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportOperationFailure("CSV 导出", error)
+            } finally {
+                _uiState.update { it.copy(isBusy = false) }
             }
-            _events.emit(
-                MainUiEvent.Toast(
-                    result.fold(
-                        onSuccess = { "已导出 $it 个账号" },
-                        onFailure = { "CSV 导出失败: ${it.message ?: "未知错误"}" }
-                    )
-                )
-            )
-            _uiState.update { it.copy(isBusy = false) }
         }
     }
 
@@ -212,15 +322,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissCampusDialog() = _uiState.update { it.copy(showCampusDialog = false) }
     fun showAboutDialog() = interact { it.copy(showAboutDialog = true) }
     fun dismissAboutDialog() = _uiState.update { it.copy(showAboutDialog = false) }
+
+    fun checkForUpdate() {
+        autoClose = false
+        if (updateCheckJob?.isActive == true) return
+        _uiState.update { it.copy(isCheckingUpdate = true, releaseCheckResult = null) }
+        updateCheckJob = viewModelScope.launch {
+            try {
+                val result = releaseChecker.check(BuildConfig.VERSION_NAME)
+                _uiState.update { it.copy(releaseCheckResult = result) }
+            } finally {
+                _uiState.update { it.copy(isCheckingUpdate = false) }
+            }
+        }
+    }
     fun showLogoutDialog() = interact { it.copy(showLogoutDialog = true) }
     fun dismissLogoutDialog() = _uiState.update { it.copy(showLogoutDialog = false) }
 
     fun dismissRestartAfterLogout() {
+        autoClose = false
         container.logs.add("已选择暂不重启，连接服务保持暂停")
         _uiState.update { it.copy(restartAfterLogoutMessage = null) }
     }
 
     fun restartAfterLogout() {
+        autoClose = false
         container.logs.add("正在重启应用并恢复已记忆的服务模式")
         _uiState.update { it.copy(restartAfterLogoutMessage = null) }
         container.coordinator.resumeConnections()
@@ -262,19 +388,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             connectionChangeMutex.withLock {
                 _uiState.update { it.copy(showLogoutDialog = false, isBusy = true) }
-                pauseConnectionWork()
-                val result = container.coordinator.logoutAndUnbind()
-                if (shouldPromptRestartAfterLogout(result)) {
-                    container.logs.add("校园网已注销，等待用户选择是否重启")
-                    _uiState.update {
-                        it.copy(
-                            isBusy = false,
-                            showFireworks = false,
-                            restartAfterLogoutMessage = result.message
-                        )
+                try {
+                    pauseConnectionWork()
+                    val result = container.coordinator.logoutAndUnbind()
+                    container.runtime.update(
+                        RuntimeStatus(message = result.message, phase = ConnectionPhase.PAUSED)
+                    )
+                    if (shouldPromptRestartAfterLogout(result)) {
+                        container.logs.add("校园网已注销，等待用户选择是否重启")
+                        _uiState.update { it.copy(restartAfterLogoutMessage = result.message) }
+                    } else {
+                        _events.emit(MainUiEvent.Toast(result.message))
                     }
-                } else {
-                    _events.emit(MainUiEvent.Toast(result.message))
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    reportOperationFailure("注销校园网", error)
+                } finally {
                     _uiState.update { it.copy(isBusy = false, showFireworks = false) }
                 }
             }
@@ -287,6 +417,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         normalModeJob = null
         KeepAliveService.stopAndAwait(getApplication())
         container.coordinator.awaitIdle()
+        container.runtime.update(RuntimeStatus(message = "连接已暂停", phase = ConnectionPhase.PAUSED))
     }
 
     private suspend fun reportOperationFailure(operation: String, error: Exception) {
@@ -294,36 +425,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val reason = error.cause?.message ?: error.message ?: "未知错误"
         val message = "${operation}失败: $reason$pauseMessage"
         container.logs.add("❌ $message")
+        if (container.coordinator.connectionsPaused) {
+            container.runtime.update(RuntimeStatus(message = message, phase = ConnectionPhase.PAUSED))
+        }
         _events.emit(MainUiEvent.Toast(message))
     }
 
-    private fun resumeConnectionWork() {
+    private suspend fun resumeConnectionWork() {
+        container.config.ensureOnboardingInitialized()
+        if (!container.config.onboardingCompleted.value) {
+            container.coordinator.pauseConnections()
+            reportOnboardingPending()
+            return
+        }
         container.coordinator.resumeConnections()
+        if (container.accounts.accounts.value.isEmpty()) {
+            container.runtime.update(ConnectionOutcome.NoAccounts.toRuntimeStatus(serviceRunning = false))
+            return
+        }
         if (container.config.keepAlive.value) KeepAliveService.start(getApplication()) else startNormalMode()
     }
 
     private fun startNormalMode() {
-        if (container.coordinator.connectionsPaused || normalModeJob?.isActive == true ||
+        if (!container.config.onboardingCompleted.value || container.coordinator.connectionsPaused || normalModeJob?.isActive == true ||
             container.accounts.accounts.value.isEmpty()) return
         normalModeJob = viewModelScope.launch {
-            while (!container.config.keepAlive.value && container.accounts.accounts.value.isNotEmpty()) {
-                when (val outcome = container.coordinator.connectOnce()) {
-                    is ConnectionOutcome.Connected -> {
-                        if (outcome.alreadyConnected) {
-                            container.logs.add("检测到网络已连接，应用保持打开")
+            try {
+                while (!container.config.keepAlive.value && container.accounts.accounts.value.isNotEmpty()) {
+                    container.runtime.update(
+                        RuntimeStatus(message = "正在检查校园网连接", phase = ConnectionPhase.CHECKING)
+                    )
+                    val outcome = container.coordinator.connectOnce()
+                    container.runtime.update(outcome.toRuntimeStatus(serviceRunning = false))
+                    when (outcome) {
+                        is ConnectionOutcome.Connected -> {
+                            if (outcome.alreadyConnected) {
+                                container.logs.add("检测到网络已连接，应用保持打开")
+                                return@launch
+                            }
+                            _uiState.update { it.copy(showFireworks = true) }
+                            delay(3_000)
+                            if (shouldAutoCloseAfterConnection(
+                                    outcome = outcome,
+                                    autoCloseEnabled = container.config.autoCloseEnabled.value,
+                                    sessionAllowsAutoClose = autoClose,
+                                    onboardingCompleted = container.config.onboardingCompleted.value
+                                )) {
+                                _events.emit(MainUiEvent.CloseApp)
+                            } else {
+                                container.logs.add("自动关闭已取消，应用保持打开")
+                            }
                             return@launch
                         }
-                        _uiState.update { it.copy(showFireworks = true) }
-                        delay(3_000)
-                        if (shouldAutoCloseAfterConnection(outcome, autoClose)) {
-                            _events.emit(MainUiEvent.CloseApp)
-                        } else {
-                            container.logs.add("自动关闭已取消，请手动退出")
-                        }
-                        return@launch
+                        ConnectionOutcome.NoAccounts -> return@launch
+                        else -> delay(3_000)
                     }
-                    ConnectionOutcome.NoAccounts -> return@launch
-                    else -> delay(3_000)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                val message = "本轮连接已停止: ${error.message ?: "未知错误"}"
+                container.logs.add("❌ $message")
+                container.runtime.update(RuntimeStatus(message = message, phase = ConnectionPhase.PAUSED))
+            } finally {
+                if (container.accounts.accounts.value.isEmpty()) {
+                    container.runtime.update(ConnectionOutcome.NoAccounts.toRuntimeStatus(serviceRunning = false))
                 }
             }
         }
@@ -332,6 +498,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun interact(transform: (MainUiState) -> MainUiState) {
         autoClose = false
         _uiState.update(transform)
+    }
+
+    private fun reportOnboardingPending() {
+        container.runtime.update(
+            if (container.accounts.accounts.value.isEmpty()) {
+                ConnectionOutcome.NoAccounts.toRuntimeStatus(serviceRunning = false)
+            } else {
+                RuntimeStatus(message = "请完成校区与自动关闭设置后开始使用", phase = ConnectionPhase.PAUSED)
+            }
+        )
     }
 
     private fun observeRepositories() {
@@ -353,6 +529,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             container.config.keepAlive.collect { enabled -> _uiState.update { it.copy(keepAlive = enabled) } }
         }
         viewModelScope.launch {
+            container.config.autoCloseEnabled.collect { enabled -> _uiState.update { it.copy(autoCloseEnabled = enabled) } }
+        }
+        viewModelScope.launch {
+            container.config.onboardingCompleted.collect { completed -> _uiState.update { it.copy(showOnboarding = !completed) } }
+        }
+        viewModelScope.launch {
+            container.config.themeMode.collect { mode -> _uiState.update { it.copy(themeMode = mode) } }
+        }
+        viewModelScope.launch {
             container.runtime.status.collect { status -> _uiState.update { it.copy(runtimeStatus = status) } }
         }
     }
@@ -360,8 +545,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 internal fun shouldAutoCloseAfterConnection(
     outcome: ConnectionOutcome,
-    autoCloseEnabled: Boolean
-): Boolean = autoCloseEnabled &&
+    autoCloseEnabled: Boolean,
+    sessionAllowsAutoClose: Boolean = true,
+    onboardingCompleted: Boolean = true
+): Boolean = autoCloseEnabled && sessionAllowsAutoClose && onboardingCompleted &&
     outcome is ConnectionOutcome.Connected &&
     !outcome.alreadyConnected
 

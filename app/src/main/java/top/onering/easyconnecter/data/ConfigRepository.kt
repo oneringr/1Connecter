@@ -12,14 +12,15 @@ import kotlinx.coroutines.withContext
 import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.Carrier
 import top.onering.easyconnecter.model.PendingRecovery
+import top.onering.easyconnecter.model.ThemeMode
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 
-class ConfigRepository internal constructor(directory: File) : ConfigStore {
-    constructor(context: Context) : this(context.filesDir)
+class ConfigRepository internal constructor(directory: File, hasExistingAccounts: Boolean = false) : ConfigStore {
+    constructor(context: Context, hasExistingAccounts: Boolean = false) : this(context.filesDir, hasExistingAccounts)
 
     private val gson = Gson()
     private val indexFile = File(directory, "current_index.txt")
@@ -27,16 +28,56 @@ class ConfigRepository internal constructor(directory: File) : ConfigStore {
     private val keepAliveFile = File(directory, "keep_alive_config.txt")
     private val loginPreferencesFile = File(directory, "login_preferences.json")
     private val pendingRecoveryFile = File(directory, "pending_recovery.json")
+    private val autoCloseFile = File(directory, "auto_close_config.txt")
+    private val onboardingCompletedFile = File(directory, "onboarding_completed.txt")
+    private val themeModeFile = File(directory, "theme_mode_config.txt")
     private val mutex = Mutex()
 
     private val _currentIndex = MutableStateFlow(readInt(indexFile, 0))
     private val _campus = MutableStateFlow(Campus.fromStored(readText(campusFile)))
     private val _keepAlive = MutableStateFlow(readText(keepAliveFile)?.toBooleanStrictOrNull() ?: false)
+    private val _autoCloseEnabled = MutableStateFlow(readText(autoCloseFile)?.toBooleanStrictOrNull() ?: true)
+    private val _onboardingCompleted = MutableStateFlow(
+        readText(onboardingCompletedFile)?.toBooleanStrictOrNull()
+            ?: (!onboardingCompletedFile.exists() && hasExistingAccounts)
+    )
+    private var onboardingStatePersisted = onboardingCompletedFile.isFile
+    private val _themeMode = MutableStateFlow(
+        ThemeMode.entries.firstOrNull { it.name == readText(themeModeFile) } ?: ThemeMode.SYSTEM
+    )
     private var loginPreferences = readLoginPreferences()
 
     override val currentIndex: StateFlow<Int> = _currentIndex.asStateFlow()
     override val campus: StateFlow<Campus> = _campus.asStateFlow()
     override val keepAlive: StateFlow<Boolean> = _keepAlive.asStateFlow()
+    val autoCloseEnabled: StateFlow<Boolean> = _autoCloseEnabled.asStateFlow()
+    val onboardingCompleted: StateFlow<Boolean> = _onboardingCompleted.asStateFlow()
+    val themeMode: StateFlow<ThemeMode> = _themeMode.asStateFlow()
+
+    suspend fun setAutoClose(enabled: Boolean) = mutex.withLock {
+        withContext(Dispatchers.IO) { autoCloseFile.writeText(enabled.toString()) }
+        _autoCloseEnabled.value = enabled
+    }
+
+    // Persist the migration decision before importing accounts or starting any connection work.
+    // An explicit false must survive an import and must never be mistaken for an existing installation.
+    suspend fun ensureOnboardingInitialized() = mutex.withLock {
+        if (!onboardingStatePersisted) {
+            withContext(Dispatchers.IO) { onboardingCompletedFile.writeText(_onboardingCompleted.value.toString()) }
+            onboardingStatePersisted = true
+        }
+    }
+
+    suspend fun markOnboardingCompleted() = mutex.withLock {
+        withContext(Dispatchers.IO) { onboardingCompletedFile.writeText(true.toString()) }
+        onboardingStatePersisted = true
+        _onboardingCompleted.value = true
+    }
+
+    suspend fun setThemeMode(mode: ThemeMode) = mutex.withLock {
+        withContext(Dispatchers.IO) { themeModeFile.writeText(mode.name) }
+        _themeMode.value = mode
+    }
 
     override suspend fun setCurrentIndex(index: Int) = mutex.withLock {
         withContext(Dispatchers.IO) { indexFile.writeText(index.coerceAtLeast(0).toString()) }

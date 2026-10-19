@@ -789,13 +789,35 @@ class ConnectionCoordinatorTest {
         val config = FakeConfigStore().apply { setKeepAlive(true) }
         val gateway = FakeNetworkGateway()
         val outcomes = mutableListOf<ConnectionOutcome>()
+        var checkingCalls = 0
 
-        coordinator(accounts, config, gateway).runKeepAlive { outcomes += it }
+        coordinator(accounts, config, gateway).runKeepAlive(onChecking = { checkingCalls++ }) { outcomes += it }
 
         assertEquals(listOf(ConnectionOutcome.NoAccounts), outcomes)
         assertTrue(config.keepAlive.value)
         assertEquals(0, gateway.connectivityChecks)
         assertTrue(gateway.loginCarriers.isEmpty())
+        assertEquals(0, checkingCalls)
+    }
+
+    @Test
+    fun announcesEachKeepAliveCheckBeforeTheNextNetworkProbe() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one")))
+        val config = FakeConfigStore().apply { setKeepAlive(true) }
+        val gateway = FakeNetworkGateway(forcedConnectivity = true)
+        val checksAtAnnouncements = mutableListOf<Int>()
+        val outcomes = mutableListOf<ConnectionOutcome>()
+
+        coordinator(accounts, config, gateway, sleep = {}).runKeepAlive(
+            onChecking = { checksAtAnnouncements += gateway.connectivityChecks }
+        ) { outcome ->
+            outcomes += outcome
+            if (outcomes.size == 2) config.setKeepAlive(false)
+        }
+
+        assertEquals(listOf(0, 1), checksAtAnnouncements)
+        assertEquals(2, outcomes.size)
+        assertTrue(outcomes.all { it is ConnectionOutcome.Connected })
     }
 
     @Test

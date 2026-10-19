@@ -1,57 +1,53 @@
 package top.onering.easyconnecter.ui.theme
 
-import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalContext
-
-private val DarkColorScheme = darkColorScheme(
-    primary = Purple80,
-    secondary = PurpleGrey80,
-    tertiary = Pink80
-)
-
-private val LightColorScheme = lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
-)
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
+import top.onering.easyconnecter.model.ThemeMode
+import top.yukonga.miuix.kmp.theme.ColorSchemeMode
+import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.ThemeController
+import top.yukonga.miuix.kmp.theme.darkColorScheme
+import top.yukonga.miuix.kmp.theme.lightColorScheme
 
 @Composable
 fun _1ConnecterTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    // Dynamic color is available on Android 12+
-    dynamicColor: Boolean = true,
-    content: @Composable () -> Unit
+    themeMode: ThemeMode = ThemeMode.SYSTEM,
+    content: @Composable () -> Unit,
 ) {
-    val colorScheme = when {
-        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            val context = LocalContext.current
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-
-        darkTheme -> DarkColorScheme
-        else -> LightColorScheme
+    val dark = when (themeMode) {
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
     }
-
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
-    )
+    val palette = if (dark) DarkConnectorPalette else LightConnectorPalette
+    val controller = remember(dark) {
+        ThemeController(
+            colorSchemeMode = if (dark) ColorSchemeMode.Dark else ColorSchemeMode.Light,
+            lightColors = lightColorScheme(
+                primary = ConnectorBlue,
+                surface = LightConnectorPalette.background,
+                background = LightConnectorPalette.background,
+                surfaceContainer = LightConnectorPalette.panel,
+                surfaceVariant = LightConnectorPalette.panel,
+                onSurface = LightConnectorPalette.ink,
+                onBackground = LightConnectorPalette.ink,
+                onSurfaceVariantSummary = LightConnectorPalette.muted,
+            ),
+            darkColors = darkColorScheme(
+                primary = ConnectorBlue,
+                surface = DarkConnectorPalette.background,
+                background = DarkConnectorPalette.background,
+                surfaceContainer = DarkConnectorPalette.panel,
+                surfaceVariant = DarkConnectorPalette.panel,
+                onSurface = DarkConnectorPalette.ink,
+                onBackground = DarkConnectorPalette.ink,
+                onSurfaceVariantSummary = DarkConnectorPalette.muted,
+            ),
+        )
+    }
+    CompositionLocalProvider(LocalConnectorPalette provides palette) {
+        MiuixTheme(controller = controller, textStyles = ConnectorTextStyles, content = content)
+    }
 }
