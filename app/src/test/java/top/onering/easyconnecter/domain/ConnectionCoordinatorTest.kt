@@ -95,7 +95,7 @@ class ConnectionCoordinatorTest {
         coordinator.connectOnce()
 
         assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE), gateway.loginCarriers)
-        assertTrue(waits.contains(3_000L))
+        assertEquals(listOf(6_000L), waits)
     }
 
     @Test
@@ -112,39 +112,33 @@ class ConnectionCoordinatorTest {
     }
 
     @Test
-    fun checksConnectivityUpToFiveTimesAndStopsAtFirstSuccess() = runTest {
-        val accounts = FakeAccountStore(listOf(account("one")))
-        val config = FakeConfigStore()
-        val gateway = FakeNetworkGateway(
-            connectivityResults = mutableListOf(false, false, true)
-        )
-
-        val outcome = coordinator(accounts, config, gateway).connectOnce()
-
+    fun healthyProbeSkipsAllAuthenticationRequests() = runTest {
+        val gateway = FakeNetworkGateway(connectivityResults = mutableListOf(true))
+        val outcome = coordinator(FakeAccountStore(listOf(account("one"))), FakeConfigStore(), gateway).connectOnce()
         assertTrue(outcome is ConnectionOutcome.Connected)
         assertTrue((outcome as ConnectionOutcome.Connected).alreadyConnected)
-        assertEquals(3, gateway.connectivityChecks)
-        assertTrue(gateway.loginCarriers.isEmpty())
+        assertEquals(1, gateway.connectivityChecks)
+        assertTrue(gateway.calls.isEmpty())
     }
 
     @Test
-    fun checksConnectivityFiveTimesBeforeStartingLogin() = runTest {
+    fun checksConnectivityOnceBeforeLoginAndVerifiesTheResult() = runTest {
         val accounts = FakeAccountStore(listOf(account("one")))
         val config = FakeConfigStore()
         val gateway = FakeNetworkGateway(
-            connectivityResults = MutableList(5) { false },
+            connectivityResults = mutableListOf(false),
             loginOutcomes = mutableListOf(LoginOutcome.Success(Carrier.MOBILE))
         )
 
         val outcome = coordinator(accounts, config, gateway).connectOnce()
 
         assertTrue(outcome is ConnectionOutcome.Connected)
-        assertEquals(6, gateway.connectivityChecks)
+        assertEquals(2, gateway.connectivityChecks)
         assertEquals(listOf(Carrier.MOBILE), gateway.loginCarriers)
     }
 
     @Test
-    fun waitsTenSecondsAfterLogoutCompletesBeforeRetryingSameLogin() = runTest {
+    fun waitsOnlyForMinimumIntervalAfterConfirmedLogout() = runTest {
         val accounts = FakeAccountStore(listOf(account("one")))
         val config = FakeConfigStore().apply { setKeepAlive(true) }
         var now = 0L
@@ -172,8 +166,8 @@ class ConnectionCoordinatorTest {
         assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE), gateway.loginCarriers)
         assertEquals(1, gateway.logoutCalls)
         assertEquals(listOf("status", "login", "status", "logout", "status", "login"), gateway.calls)
-        assertEquals(listOf(10_000L), waits)
-        assertEquals(10_000L, loginStartedTimes[1] - logoutCompletedAt)
+        assertEquals(listOf(3_000L), waits)
+        assertEquals(3_000L, loginStartedTimes[1] - logoutCompletedAt)
         assertTrue(config.keepAlive.value)
     }
 
@@ -198,45 +192,56 @@ class ConnectionCoordinatorTest {
 
         assertTrue(outcome is ConnectionOutcome.Failed)
         assertEquals(listOf(Carrier.MOBILE), gateway.loginCarriers)
-        assertEquals(listOf(1_000L, 1_000L), waits)
+        assertEquals(List(5) { 1_000L }, waits)
         assertEquals(0, config.currentIndex.value)
         assertEquals(1, accounts.accounts.value.size)
     }
 
     @Test
-    fun boundsClientIpRecoveryWithoutRotatingAndDefersFurtherCleanup() = runTest {
+    fun delayedLogoutStatusIsPolledUntilOfflineBeforeRetrying() = runTest {
+        val online = Result.success(SessionStatus(true, "one", null, null))
+        val offline = Result.success(SessionStatus(false, null, null, null))
+        val gateway = FakeNetworkGateway(
+            statuses = (listOf(offline, online) + List(3) { online } + offline).toMutableList(),
+            loginOutcomes = mutableListOf(LoginOutcome.ClientIpOnline("clientip online"), LoginOutcome.Success(Carrier.MOBILE))
+        )
+        val waits = mutableListOf<Long>()
+        var now = 0L
+        val outcome = coordinator(FakeAccountStore(listOf(account("one"))), FakeConfigStore(), gateway, { now }) {
+            waits += it
+            now += it
+        }.connectOnce()
+
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertEquals(1, gateway.logoutCalls)
+        assertEquals(2, gateway.loginAccounts.size)
+        assertEquals(List(3) { 1_000L }, waits)
+        assertEquals(listOf("logout", "status", "status", "status", "status", "login"), gateway.calls.drop(3))
+    }
+
+    @Test
+    fun exhaustedRecoveryConfirmsOfflineAndAdvancesInsteadOfPinningTheAccount() = runTest {
         val accounts = FakeAccountStore(listOf(account("one"), account("two")))
         val config = FakeConfigStore()
         var now = 0L
         val waits = mutableListOf<Long>()
-        val gateway = FakeNetworkGateway(
-            loginOutcomes = mutableListOf(
-                LoginOutcome.ClientIpOnline("clientip online"),
-                LoginOutcome.ClientIpOnline("clientip online"),
-                LoginOutcome.ClientIpOnline("clientip online"),
-                LoginOutcome.ClientIpOnline("clientip online"),
-                LoginOutcome.ClientIpOnline("clientip online"),
-                LoginOutcome.ClientIpOnline("clientip online"),
-                LoginOutcome.ClientIpOnline("clientip online")
-            )
-        )
+        val gateway = FakeNetworkGateway(loginOutcomes = (
+            List(4) { LoginOutcome.ClientIpOnline("clientip online") } + LoginOutcome.Success(Carrier.MOBILE)
+        ).toMutableList())
+        val coordinator = coordinator(accounts, config, gateway, { now }) { waits += it; now += it }
 
-        val coordinator = coordinator(accounts, config, gateway, { now }) {
-            waits += it
-            now += it
-        }
-        val outcome = coordinator.connectOnce()
-        val deferredOutcome = coordinator.connectOnce()
+        assertTrue(coordinator.connectOnce() is ConnectionOutcome.Failed)
+        assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE, Carrier.TELECOM, Carrier.TELECOM), gateway.loginCarriers)
+        assertEquals(4, gateway.logoutCalls)
+        assertEquals("status", gateway.calls.last())
+        assertEquals(1, config.currentIndex.value)
+        assertNull(config.pendingRecovery())
+        assertEquals(2, accounts.accounts.value.size)
+        assertEquals(listOf(3_000L, 3_000L, 3_000L), waits)
 
-        assertTrue(outcome is ConnectionOutcome.Failed)
-        assertTrue(deferredOutcome is ConnectionOutcome.Failed)
-        assertEquals(List(7) { Carrier.MOBILE }, gateway.loginCarriers)
-        assertEquals(6, gateway.logoutCalls)
-        assertEquals(0, config.currentIndex.value)
-        assertEquals(
-            listOf(10_000L, 20_000L, 30_000L, 40_000L, 50_000L, 60_000L),
-            waits
-        )
+        assertTrue(coordinator.connectOnce() is ConnectionOutcome.Connected)
+        assertEquals("two", gateway.loginAccounts.last())
+        assertTrue(waits.all { it <= 3_000L })
     }
 
     @Test
@@ -244,7 +249,7 @@ class ConnectionCoordinatorTest {
         val accounts = FakeAccountStore(listOf(account("one"), account("two")))
         val config = FakeConfigStore().apply { setCurrentIndex(1) }
         val gateway = FakeNetworkGateway(
-            connectivityResults = (List(5) { false } + true).toMutableList(),
+            connectivityResults = listOf(false, true).toMutableList(),
             loginOutcomes = mutableListOf(LoginOutcome.ClientIpOnline("clientip online"))
         )
 
@@ -261,7 +266,7 @@ class ConnectionCoordinatorTest {
     fun rechecksInternetBeforeCleaningExistingOnlineSession() = runTest {
         val config = FakeConfigStore().apply { setCurrentIndex(1) }
         val gateway = FakeNetworkGateway(
-            connectivityResults = (List(5) { false } + true).toMutableList(),
+            connectivityResults = listOf(false, true).toMutableList(),
             statuses = mutableListOf(Result.success(SessionStatus(true, "one", null, null)))
         )
 
@@ -292,7 +297,7 @@ class ConnectionCoordinatorTest {
         assertEquals(listOf("one"), gateway.loginAccounts)
         assertEquals(listOf(Carrier.TELECOM), gateway.loginCarriers)
         assertEquals(listOf("status", "unbind", "logout", "status", "login"), gateway.calls)
-        assertEquals(listOf(10_000L), waits)
+        assertEquals(listOf(3_000L), waits)
         assertEquals(1, config.currentIndex.value)
     }
 
@@ -324,7 +329,7 @@ class ConnectionCoordinatorTest {
     fun recoveryKeepsCurrentCarrierAfterAlternateCarrierAcceptedLogin() = runTest {
         val config = FakeConfigStore().apply { preferred["one"] = Carrier.MOBILE }
         val gateway = FakeNetworkGateway(
-            connectivityResults = (List(10) { false } + true).toMutableList(),
+            connectivityResults = listOf(false, false, false, true).toMutableList(),
             loginOutcomes = mutableListOf(
                 LoginOutcome.ProtocolError("移动失败"),
                 LoginOutcome.Success(Carrier.TELECOM),
@@ -345,8 +350,9 @@ class ConnectionCoordinatorTest {
     fun failedStatusAfterAcceptedLoginRetainsCarrierForNextRound() = runTest {
         val config = FakeConfigStore().apply { preferred["one"] = Carrier.MOBILE }
         val gateway = FakeNetworkGateway(
-            connectivityResults = (List(20) { false } + true).toMutableList(),
+            connectivityResults = listOf(false, false, false, false, true).toMutableList(),
             statuses = mutableListOf(
+                Result.success(SessionStatus(false, null, null, null)),
                 Result.success(SessionStatus(false, null, null, null)),
                 Result.failure(IllegalStateException("status response lost"))
             ),
@@ -425,9 +431,6 @@ class ConnectionCoordinatorTest {
     fun retainsRecoveryAccountAndCarrierAcrossFailedConnectionRounds() = runTest {
         val failures = listOf(
             listOf(LoginOutcome.NetworkError("response lost")),
-            listOf(LoginOutcome.ProtocolError("temporary gateway error")),
-            listOf(LoginOutcome.OperatorNotBound("bind userid error")),
-            listOf(LoginOutcome.InvalidCredentials("credentials rejected")),
             List(3) { LoginOutcome.RateLimited(3, "waitsec <3") }
         )
         failures.forEach { failedOutcomes ->
@@ -509,7 +512,7 @@ class ConnectionCoordinatorTest {
         )
         val recoveryWaitStarted = CompletableDeferred<Unit>()
         val original = coordinator(accounts, originalConfig, originalGateway, sleep = { waitMillis ->
-            assertEquals(10_000L, waitMillis)
+            assertEquals(3_000L, waitMillis)
             recoveryWaitStarted.complete(Unit)
             awaitCancellation()
         })
@@ -655,7 +658,7 @@ class ConnectionCoordinatorTest {
 
         assertTrue(outcome is ConnectionOutcome.Connected)
         assertEquals(2, gateway.loginAccounts.size)
-        assertEquals(listOf(10_000L), waits)
+        assertEquals(listOf(3_000L), waits)
     }
 
     @Test
@@ -673,8 +676,27 @@ class ConnectionCoordinatorTest {
         assertTrue(outcome is ConnectionOutcome.Failed)
         assertEquals(List(3) { Carrier.MOBILE }, gateway.loginCarriers)
         assertEquals(List(3) { "one" }, gateway.loginAccounts)
-        assertEquals(listOf(7_000L, 7_000L), waits)
+        assertEquals(listOf(7_000L, 12_000L), waits)
         assertEquals(0, config.currentIndex.value)
+    }
+
+    @Test
+    fun longerServerRateLimitOverridesAdaptiveWait() = runTest {
+        val gateway = FakeNetworkGateway(loginOutcomes = mutableListOf(
+            LoginOutcome.RateLimited(30, "waitsec <30"),
+            LoginOutcome.Success(Carrier.MOBILE)
+        ))
+        val waits = mutableListOf<Long>()
+        var now = 0L
+
+        val outcome = coordinator(FakeAccountStore(listOf(account("one"))), FakeConfigStore(), gateway, { now }) {
+            waits += it
+            now += it
+        }.connectOnce()
+
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertEquals(listOf(30_000L), waits)
+        assertEquals(listOf(Carrier.MOBILE, Carrier.MOBILE), gateway.loginCarriers)
     }
 
     @Test
@@ -752,7 +774,7 @@ class ConnectionCoordinatorTest {
         val waitStarted = CompletableDeferred<Unit>()
         val waitFinished = CompletableDeferred<Unit>()
         val coordinator = coordinator(accounts, config, gateway) {
-            assertEquals(10_000L, it)
+            assertEquals(3_000L, it)
             waitStarted.complete(Unit)
             waitFinished.await()
         }
@@ -780,7 +802,7 @@ class ConnectionCoordinatorTest {
         assertEquals(ConnectionOutcome.NoAccounts, outcomes.last())
         assertTrue(accounts.accounts.value.isEmpty())
         assertTrue(config.keepAlive.value)
-        assertEquals(5, gateway.connectivityChecks)
+        assertEquals(1, gateway.connectivityChecks)
     }
 
     @Test
@@ -861,6 +883,103 @@ class ConnectionCoordinatorTest {
         assertEquals(false, result.unbindSucceeded)
         assertTrue(result.message.contains("解绑失败"))
         assertEquals(listOf("status", "unbind", "logout", "status"), gateway.calls)
+    }
+
+
+    @Test
+    fun recoveryAuthenticationErrorsChangeCarrierOnlyAfterOfflineConfirmationWithoutDeletingAccount() = runTest {
+        for (failure in listOf(
+            LoginOutcome.InvalidCredentials("rejected"), LoginOutcome.OperatorNotBound("not bound"),
+            LoginOutcome.ProtocolError("carrier rejected")
+        )) {
+            val accounts = FakeAccountStore(listOf(account("one"), account("two")))
+            val config = FakeConfigStore().apply {
+                setCurrentIndex(1)
+                setPendingRecovery(PendingRecovery(Campus.CHENGBEI, "one", Carrier.TELECOM))
+            }
+            val gateway = FakeNetworkGateway(loginOutcomes = mutableListOf(failure, LoginOutcome.Success(Carrier.MOBILE)))
+            var now = 0L
+            val outcome = coordinator(accounts, config, gateway, { now }) { now += it }.connectOnce()
+            assertTrue(outcome is ConnectionOutcome.Connected)
+            assertEquals(listOf(Carrier.TELECOM, Carrier.MOBILE), gateway.loginCarriers)
+            assertEquals(2, accounts.accounts.value.size)
+            assertEquals(1, config.currentIndex.value)
+            val firstLogin = gateway.calls.indexOf("login")
+            assertEquals("status", gateway.calls[firstLogin + 1])
+        }
+    }
+
+    @Test
+    fun persistedAttemptBudgetSurvivesCoordinatorRecreationAndKeepsNextCandidateIndex() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one"), account("two")))
+        val saved = ConfigRepository(temporaryFolder.root)
+        saved.setCurrentIndex(1)
+        saved.setPendingRecovery(PendingRecovery(Campus.CHENGBEI, "one", Carrier.MOBILE, 2))
+        val recreated = ConfigRepository(temporaryFolder.root)
+        val gateway = FakeNetworkGateway(loginOutcomes = mutableListOf(LoginOutcome.Success(Carrier.TELECOM)))
+        val outcome = coordinator(accounts, recreated, gateway).connectOnce()
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertEquals(listOf(Carrier.TELECOM), gateway.loginCarriers)
+        assertEquals(listOf("one"), gateway.loginAccounts)
+        assertEquals(1, recreated.currentIndex.value)
+        assertNull(ConfigRepository(temporaryFolder.root).pendingRecovery())
+    }
+
+    @Test
+    fun interruptedRecoveryRequestKeepsItsReservedAttemptAcrossRestart() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one"), account("two")))
+        val config = ConfigRepository(temporaryFolder.root)
+        config.setPendingRecovery(PendingRecovery(Campus.CHENGBEI, "one", Carrier.MOBILE))
+        val interrupted = FakeNetworkGateway(onLogin = { throw kotlinx.coroutines.CancellationException("process interrupted") })
+        assertTrue(runCatching { coordinator(accounts, config, interrupted).connectOnce() }.exceptionOrNull() is kotlinx.coroutines.CancellationException)
+        val restored = ConfigRepository(temporaryFolder.root)
+        assertEquals(2, restored.pendingRecovery()?.loginAttempts)
+        val resumed = FakeNetworkGateway(loginOutcomes = mutableListOf(LoginOutcome.Success(Carrier.TELECOM)))
+        assertTrue(coordinator(accounts, restored, resumed).connectOnce() is ConnectionOutcome.Connected)
+        assertEquals(listOf(Carrier.TELECOM), resumed.loginCarriers)
+    }
+
+    @Test
+    fun secondConnectivityConfirmationPreservesSlowlyActivatedSession() = runTest {
+        val gateway = FakeNetworkGateway(
+            connectivityResults = mutableListOf(false, false, true),
+            loginOutcomes = mutableListOf(LoginOutcome.Success(Carrier.MOBILE))
+        )
+        val outcome = coordinator(FakeAccountStore(listOf(account("one"))), FakeConfigStore(), gateway).connectOnce()
+        assertTrue(outcome is ConnectionOutcome.Connected)
+        assertEquals(1, gateway.loginAccounts.size)
+        assertEquals(0, gateway.logoutCalls)
+    }
+
+    @Test
+    fun repeatedAcceptedLoginsWithoutInternetAreBoundedAndDoNotDeleteAccounts() = runTest {
+        val accounts = FakeAccountStore(listOf(account("one"), account("two")))
+        val config = FakeConfigStore()
+        val gateway = FakeNetworkGateway(
+            loginOutcomes = MutableList(4) { LoginOutcome.Success(Carrier.MOBILE) }, forcedConnectivity = false
+        )
+        var now = 0L
+        val outcome = coordinator(accounts, config, gateway, { now }) { now += it }.connectOnce()
+        assertTrue(outcome is ConnectionOutcome.Failed)
+        assertEquals(4, gateway.loginAccounts.size)
+        assertEquals(4, gateway.logoutCalls)
+        assertEquals(1, config.currentIndex.value)
+        assertEquals(2, accounts.accounts.value.size)
+        assertNull(config.pendingRecovery())
+        assertTrue(config.preferred.isEmpty())
+    }
+
+    @Test
+    fun singleAccountFailureUsesShortCooldownWithoutProbingOrAuthenticatingDuringIt() = runTest {
+        val gateway = FakeNetworkGateway(loginOutcomes = MutableList(4) { LoginOutcome.ClientIpOnline("clientip online") })
+        var now = 0L
+        val coordinator = coordinator(FakeAccountStore(listOf(account("one"))), FakeConfigStore(), gateway, { now }) { now += it }
+        assertTrue(coordinator.connectOnce() is ConnectionOutcome.Failed)
+        val probes = gateway.connectivityChecks
+        now += 14_000
+        assertTrue(coordinator.connectOnce() is ConnectionOutcome.Failed)
+        assertEquals(4, gateway.loginAccounts.size)
+        assertEquals(probes, gateway.connectivityChecks)
     }
 
     private fun coordinator(

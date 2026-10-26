@@ -139,7 +139,13 @@ class ConfigRepository internal constructor(directory: File, hasExistingAccounts
                     ?: throw IOException("恢复记录运营商无效")
                 val studentId = saved.studentId?.takeIf { it.isNotBlank() }
                     ?: throw IOException("恢复记录账号为空")
-                PendingRecovery(campus, studentId, carrier)
+                val attempts = saved.loginAttempts ?: 1 // Old records already followed a failed login.
+                if (attempts !in 0..2) throw IOException("恢复记录重试次数无效")
+                val exhausted = saved.exhaustedCarriers.orEmpty().map { name ->
+                    Carrier.entries.firstOrNull { it.name == name }
+                        ?: throw IOException("恢复记录已尝试运营商无效")
+                }.toSet()
+                PendingRecovery(campus, studentId, carrier, attempts, exhausted)
             } catch (error: Exception) {
                 throw IOException("无法读取待恢复会话", error)
             }
@@ -156,7 +162,9 @@ class ConfigRepository internal constructor(directory: File, hasExistingAccounts
                     val json = gson.toJson(PersistedRecovery(
                         campus = recovery.campus.name,
                         studentId = recovery.studentId,
-                        carrier = recovery.carrier.name
+                        carrier = recovery.carrier.name,
+                        loginAttempts = recovery.loginAttempts,
+                        exhaustedCarriers = recovery.exhaustedCarriers.map { it.name }
                     ))
                     FileOutputStream(temporaryFile).use { output ->
                         output.write(json.toByteArray(Charsets.UTF_8))
@@ -209,6 +217,8 @@ class ConfigRepository internal constructor(directory: File, hasExistingAccounts
     private data class PersistedRecovery(
         val campus: String? = null,
         val studentId: String? = null,
-        val carrier: String? = null
+        val carrier: String? = null,
+        val loginAttempts: Int? = null,
+        val exhaustedCarriers: List<String>? = null
     )
 }

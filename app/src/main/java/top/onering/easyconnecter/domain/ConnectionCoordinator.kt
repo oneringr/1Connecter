@@ -29,8 +29,9 @@ class ConnectionCoordinator(
     private val sleep: suspend (Long) -> Unit = { delay(it) }
 ) {
     private val operationMutex = Mutex()
-    private var lastLoginStartedAt = Long.MIN_VALUE
+    private var nextLoginAllowedAt = Long.MIN_VALUE
     private var recoveryAllowedAt = Long.MIN_VALUE
+    private var consecutiveFailedAccounts = 0
     @Volatile private var connectionsEnabled = true
     val connectionsPaused: Boolean get() = !connectionsEnabled
 
@@ -56,8 +57,12 @@ class ConnectionCoordinator(
 
     private suspend fun connectLocked(): ConnectionOutcome {
         ensureConnectionsEnabled()
+        if (nowMillis() < recoveryAllowedAt) {
+            return ConnectionOutcome.Failed("校园网恢复暂缓，稍后重新检查会话")
+        }
         if (hasInternetConnectivity()) {
             recoveryAllowedAt = Long.MIN_VALUE
+            consecutiveFailedAccounts = 0
             savePendingRecovery(null)
             logRepository.add("✅ 网络正常")
             return ConnectionOutcome.Connected(null, null, alreadyConnected = true)
@@ -65,10 +70,6 @@ class ConnectionCoordinator(
 
         val accounts = accountRepository.accounts.value
         if (accounts.isEmpty()) return ConnectionOutcome.NoAccounts
-        if (nowMillis() < recoveryAllowedAt) {
-            return ConnectionOutcome.Failed("校园网恢复暂缓，稍后重新检查会话")
-        }
-
         val index = configRepository.currentIndex.value.coerceIn(accounts.indices)
         if (index != configRepository.currentIndex.value) configRepository.setCurrentIndex(index)
         val campus = configRepository.campus.value
@@ -77,11 +78,72 @@ class ConnectionCoordinator(
         if (savedRecovery != pending) savePendingRecovery(null)
         var account = pending?.let { recovery -> accounts.first { it.studentId == recovery.studentId } } ?: accounts[index]
         var carrier = pending?.carrier ?: configRepository.preferredCarrier(account.studentId) ?: Carrier.MOBILE
-        var triedAlternateCarrier = false
+        var loginAttempts = pending?.loginAttempts ?: 0
+        val exhaustedCarriers = pending?.exhaustedCarriers.orEmpty().toMutableSet()
         var recoveringSession = pending != null
         var advanceIndexOnSuccess = pending == null
-        var recoveryCount = 0
         var rateLimitRetries = 0
+        var completedLoginRequests = 0
+
+        suspend fun rememberRecovery() {
+            savePendingRecovery(PendingRecovery(campus, account.studentId, carrier, loginAttempts, exhaustedCarriers.toSet()))
+        }
+
+        suspend fun connected(outcome: LoginOutcome): ConnectionOutcome.Connected {
+            recoveryAllowedAt = Long.MIN_VALUE
+            consecutiveFailedAccounts = 0
+            savePendingRecovery(null)
+            if (outcome is LoginOutcome.ClientIpOnline) {
+                logRepository.add("✅ clientip online，但外网正常，保留现有会话")
+                return ConnectionOutcome.Connected(null, null, alreadyConnected = true)
+            }
+            configRepository.recordSuccessfulLogin(account.studentId, carrier)
+            if (advanceIndexOnSuccess) configRepository.setCurrentIndex((index + 1) % accounts.size)
+            logRepository.add("✅ ${carrier.displayName}登录成功，已确认外网可用")
+            return ConnectionOutcome.Connected(account, carrier, alreadyConnected = false)
+        }
+
+        suspend fun cleanRecoverySession(status: SessionStatus): ConnectionOutcome.Failed? {
+            if (status.loggedIn) {
+                val activeAccount = accounts.find { it.studentId == status.account }
+                if (activeAccount == null) {
+                    savePendingRecovery(null)
+                    return deferRecovery("在线会话账号不在本地，保留会话并停止自动恢复")
+                }
+                if (activeAccount.studentId != account.studentId) {
+                    account = activeAccount
+                    carrier = configRepository.preferredCarrier(account.studentId) ?: Carrier.MOBILE
+                    loginAttempts = 1
+                    exhaustedCarriers.clear()
+                }
+                // An existing online session represents an earlier accepted login.
+                loginAttempts = maxOf(1, loginAttempts)
+                advanceIndexOnSuccess = false
+            }
+            recoveringSession = true
+            rememberRecovery()
+            val cleanup = logoutAndUnbindLocked(campus, Result.success(status), automatic = true)
+            if (!cleanup.sessionLoggedOut) return deferRecovery(cleanup.message)
+            logRepository.add("已确认校园网离线，按请求间隔和服务端限速继续登录")
+            return null
+        }
+
+        suspend fun moveToNextAccount(): ConnectionOutcome.Failed {
+            // Preserve a next-candidate index that already differs from the recovered account.
+            val accountIndex = accounts.indexOf(account)
+            val nextIndex = if (index != accountIndex) index else (accountIndex + 1) % accounts.size
+            if (recoveringSession) rememberRecovery()
+            configRepository.setCurrentIndex(nextIndex)
+            savePendingRecovery(null)
+            consecutiveFailedAccounts++
+            val message = "账号 ${account.displayLabel()} 的两种运营商均未恢复外网，保留账号并切换下一个候选"
+            if (accounts.size == 1 || consecutiveFailedAccounts >= MAX_FAILED_ACCOUNTS_PER_BATCH) {
+                consecutiveFailedAccounts = 0
+                return deferRecovery("$message；连续失败后短暂降频")
+            }
+            logRepository.add("⚠️ $message")
+            return ConnectionOutcome.Failed(message)
+        }
 
         ensureConnectionsEnabled()
         val initialStatus = networkGateway.checkStatus(campus).getOrElse {
@@ -91,48 +153,41 @@ class ConnectionCoordinator(
         if (initialStatus.loggedIn) {
             if (hasInternetConnectivity()) {
                 savePendingRecovery(null)
+                consecutiveFailedAccounts = 0
                 return ConnectionOutcome.Connected(null, null, alreadyConnected = true)
             }
-            val activeAccount = accounts.find { it.studentId == initialStatus.account }
-            if (activeAccount == null) {
-                savePendingRecovery(null)
-                return deferRecovery("在线会话账号不在本地，保留会话并停止自动恢复")
-            }
-            if (activeAccount.studentId != account.studentId) {
-                account = activeAccount
-                carrier = configRepository.preferredCarrier(activeAccount.studentId) ?: Carrier.MOBILE
-            }
-            recoveringSession = true
-            advanceIndexOnSuccess = false
-            savePendingRecovery(PendingRecovery(campus, account.studentId, carrier))
             logRepository.add("⚠️ 校园网会话在线但外网不可用，先清理并确认离线")
-            val cleanup = logoutAndUnbindLocked(campus, Result.success(initialStatus), automatic = true)
-            if (!cleanup.sessionLoggedOut) return deferRecovery(cleanup.message)
-            recoveryCount++
-            waitForRecovery(recoveryCount)
+            cleanRecoverySession(initialStatus)?.let { return it }
         }
 
         while (true) {
+            // Every path reaching this point has confirmed the session is offline.
+            if (recoveringSession && (loginAttempts >= MAX_LOGINS_PER_CARRIER || carrier in exhaustedCarriers)) {
+                exhaustedCarriers += carrier
+                val alternate = carrier.alternate()
+                if (alternate in exhaustedCarriers) return moveToNextAccount()
+                carrier = alternate
+                loginAttempts = 0
+                rememberRecovery()
+                logRepository.add("⚠️ 当前运营商恢复次数已用尽，已确认离线，改试${carrier.displayName}")
+            }
+            if (completedLoginRequests >= MAX_LOGINS_PER_ROUND) {
+                return deferRecovery("本轮会话连续变化，保留恢复进度并稍后重查")
+            }
             enforceLoginInterval()
             ensureConnectionsEnabled()
+            loginAttempts++
+            // Reserve this attempt before sending; cancellation/restart must not reset its budget.
+            if (recoveringSession) rememberRecovery()
+            ensureConnectionsEnabled()
             logRepository.add("尝试${carrier.displayName}登录(${campus.displayName}): ${account.displayLabel()}")
-            lastLoginStartedAt = nowMillis()
+            nextLoginAllowedAt = nowMillis() + MIN_LOGIN_INTERVAL_MILLIS
             val outcome = networkGateway.login(account.studentId, account.password, campus, carrier)
             ensureConnectionsEnabled()
+            if (outcome !is LoginOutcome.RateLimited) completedLoginRequests++
             when (outcome) {
                 is LoginOutcome.Success, is LoginOutcome.ClientIpOnline -> {
-                    if (hasInternetConnectivity()) {
-                        recoveryAllowedAt = Long.MIN_VALUE
-                        savePendingRecovery(null)
-                        if (outcome is LoginOutcome.ClientIpOnline) {
-                            logRepository.add("✅ clientip online，但外网正常，保留现有会话")
-                            return ConnectionOutcome.Connected(null, null, alreadyConnected = true)
-                        }
-                        configRepository.recordSuccessfulLogin(account.studentId, carrier)
-                        if (advanceIndexOnSuccess) configRepository.setCurrentIndex((index + 1) % accounts.size)
-                        logRepository.add("✅ ${carrier.displayName}登录成功，已确认外网可用")
-                        return ConnectionOutcome.Connected(account, carrier, alreadyConnected = false)
-                    }
+                    if (hasInternetConnectivity()) return connected(outcome)
 
                     logRepository.add(if (outcome is LoginOutcome.ClientIpOnline) {
                         "⚠️ clientip online 且外网不可用，检查当前会话"
@@ -140,68 +195,77 @@ class ConnectionCoordinator(
                         "⚠️ 登录响应成功，但外网仍不可用，检查当前会话"
                     })
                     // Keep the attempted identity even if the status response is lost.
-                    savePendingRecovery(PendingRecovery(campus, account.studentId, carrier))
+                    recoveringSession = true
+                    rememberRecovery()
                     ensureConnectionsEnabled()
                     val status = networkGateway.checkStatus(campus).getOrElse {
                         return deferRecovery("无法确认校园网会话状态，停止本轮恢复: ${it.message ?: "未知错误"}")
                     }
                     ensureConnectionsEnabled()
-                    if (status.loggedIn) {
-                        val activeAccount = accounts.find { it.studentId == status.account }
-                        if (activeAccount == null) {
-                            savePendingRecovery(null)
-                            return deferRecovery("在线会话账号不在本地，保留会话并停止自动恢复")
-                        }
-                        if (activeAccount.studentId != account.studentId) {
-                            account = activeAccount
-                            carrier = configRepository.preferredCarrier(activeAccount.studentId) ?: Carrier.MOBILE
-                        }
-                        advanceIndexOnSuccess = false
+                    // Recheck before destructive cleanup; activation and a single probe can race.
+                    if (hasInternetConnectivity()) {
+                        return connected(if (status.loggedIn && status.account != account.studentId) {
+                            LoginOutcome.ClientIpOnline("已有其他会话可上网")
+                        } else outcome)
                     }
-                    recoveringSession = true
-                    savePendingRecovery(PendingRecovery(campus, account.studentId, carrier))
-                    if (recoveryCount >= MAX_CLIENT_IP_ONLINE_RETRIES) {
-                        return deferRecovery("校园网会话冲突或外网故障仍存在，停止本轮恢复，保留当前账号")
-                    }
-                    val cleanup = logoutAndUnbindLocked(campus, Result.success(status), automatic = true)
-                    if (!cleanup.sessionLoggedOut) return deferRecovery(cleanup.message)
-                    recoveryCount++
+                    cleanRecoverySession(status)?.let { return it }
                     rateLimitRetries = 0
-                    waitForRecovery(recoveryCount)
                 }
 
                 is LoginOutcome.InvalidCredentials, is LoginOutcome.OperatorNotBound -> {
-                    if (recoveringSession) return deferRecovery("${outcome.message}，保留待恢复账号并停止本轮重试")
+                    if (recoveringSession) {
+                        val status = networkGateway.checkStatus(campus).getOrElse {
+                            return deferRecovery("认证失败后无法确认会话，保留账号并稍后重查")
+                        }
+                        if (hasInternetConnectivity()) return connected(LoginOutcome.ClientIpOnline("已有连接可用"))
+                        cleanRecoverySession(status)?.let { return it }
+                        loginAttempts = MAX_LOGINS_PER_CARRIER
+                        rememberRecovery()
+                        logRepository.add("⚠️ ${outcome.message}，保留账号并停止重试此运营商")
+                        continue
+                    }
                     logRepository.add("❌ ${outcome.message}，删除账号: ${account.displayLabel()}")
                     removeAccountLocked(accounts.indexOf(account), account)
                     return ConnectionOutcome.AccountRemoved(account)
                 }
 
                 is LoginOutcome.RateLimited -> {
-                    val waitMillis = outcome.waitSeconds.coerceAtLeast(MIN_LOGIN_INTERVAL_SECONDS) * 1_000L
+                    // A rejected rate-limited request did not consume an authentication attempt.
+                    loginAttempts--
+                    if (recoveringSession) rememberRecovery()
+                    // A rejected minimum-interval retry needs more breathing room. Bound the
+                    // local adjustment, while always honoring a longer server-provided wait.
+                    val adaptiveWaitMillis = MIN_LOGIN_INTERVAL_MILLIS * if (rateLimitRetries == 0) 2 else 4
+                    val waitMillis = maxOf(outcome.waitSeconds.toLong() * 1_000L, adaptiveWaitMillis)
+                    nextLoginAllowedAt = maxOf(nextLoginAllowedAt, nowMillis() + waitMillis)
                     if (rateLimitRetries >= MAX_RATE_LIMIT_RETRIES) {
                         return deferRecovery("${outcome.message}，本轮停止重试，保留当前账号", waitMillis)
                     }
                     rateLimitRetries++
                     logRepository.add("⚠️ 请求过快，${waitMillis / 1_000} 秒后重试${carrier.displayName}")
-                    sleep(waitMillis)
-                    ensureConnectionsEnabled()
                 }
 
                 is LoginOutcome.NetworkError -> {
+                    loginAttempts--
+                    if (recoveringSession) rememberRecovery()
                     logRepository.add("❌ ${outcome.message}")
-                    return if (recoveringSession) deferRecovery(outcome.message) else ConnectionOutcome.Failed(outcome.message)
+                    return deferRecovery(outcome.message)
                 }
 
                 is LoginOutcome.ProtocolError -> {
                     logRepository.add("❌ ${outcome.message}")
-                    if (recoveringSession) return deferRecovery(outcome.message)
-                    if (triedAlternateCarrier) {
-                        configRepository.setCurrentIndex((index + 1) % accounts.size)
-                        return ConnectionOutcome.Failed("账号 ${account.displayLabel()} 的移动和电信登录均失败")
+                    val status = networkGateway.checkStatus(campus).getOrElse {
+                        return deferRecovery("认证失败后无法确认会话，暂不轮换账号")
                     }
+                    if (status.loggedIn) {
+                        if (hasInternetConnectivity()) return connected(LoginOutcome.ClientIpOnline("已有连接可用"))
+                        cleanRecoverySession(status)?.let { return it }
+                    }
+                    exhaustedCarriers += carrier
+                    if (carrier.alternate() in exhaustedCarriers) return moveToNextAccount()
                     carrier = carrier.alternate()
-                    triedAlternateCarrier = true
+                    loginAttempts = 0
+                    if (recoveringSession) rememberRecovery()
                     rateLimitRetries = 0
                 }
             }
@@ -235,6 +299,7 @@ class ConnectionCoordinator(
         configRepository.setCurrentIndex(0)
         configRepository.clearLoginPreferences()
         recoveryAllowedAt = Long.MIN_VALUE
+        consecutiveFailedAccounts = 0
     }
 
     suspend fun removeAccount(index: Int): Account? = operationMutex.withLock {
@@ -247,6 +312,7 @@ class ConnectionCoordinator(
         savePendingRecovery(null)
         configRepository.setCampus(campus)
         recoveryAllowedAt = Long.MIN_VALUE
+        consecutiveFailedAccounts = 0
     }
 
     suspend fun logoutAndUnbind(): LogoutOutcome = operationMutex.withLock {
@@ -322,6 +388,7 @@ class ConnectionCoordinator(
 
         ensureOperationEnabled()
         val logoutResult = networkGateway.logout(campus)
+        nextLoginAllowedAt = nowMillis() + MIN_LOGIN_INTERVAL_MILLIS
         ensureOperationEnabled()
         if (logoutResult.isFailure) {
             val warning = "注销请求失败: ${logoutResult.exceptionOrNull()?.message ?: "未知错误"}"
@@ -376,32 +443,22 @@ class ConnectionCoordinator(
 
     private suspend fun enforceLoginInterval() {
         ensureConnectionsEnabled()
-        if (lastLoginStartedAt == Long.MIN_VALUE) return
-        val elapsed = nowMillis() - lastLoginStartedAt
-        if (elapsed < MIN_LOGIN_INTERVAL_MILLIS) sleep(MIN_LOGIN_INTERVAL_MILLIS - elapsed)
+        if (nextLoginAllowedAt == Long.MIN_VALUE) return
+        val remaining = nextLoginAllowedAt - nowMillis()
+        if (remaining > 0) sleep(remaining)
         ensureConnectionsEnabled()
     }
 
     private suspend fun hasInternetConnectivity(): Boolean {
-        repeat(CONNECTIVITY_PROBE_ATTEMPTS) {
-            ensureConnectionsEnabled()
-            val connected = networkGateway.isInternetConnected()
-            ensureConnectionsEnabled()
-            if (connected) return true
-        }
-        return false
+        ensureConnectionsEnabled()
+        val connected = networkGateway.isInternetConnected()
+        ensureConnectionsEnabled()
+        return connected
     }
 
     private suspend fun ensureConnectionsEnabled() {
         currentCoroutineContext().ensureActive()
         if (!connectionsEnabled) throw ConnectionPausedException()
-    }
-
-    private suspend fun waitForRecovery(attempt: Int) {
-        val waitMillis = attempt * CLIENT_IP_ONLINE_RETRY_STEP_MILLIS
-        logRepository.add("已确认校园网离线，${waitMillis / 1_000} 秒后重试同一会话账号（第 $attempt 次恢复）")
-        sleep(waitMillis)
-        ensureConnectionsEnabled()
     }
 
     private fun deferRecovery(message: String, minimumDelayMillis: Long = 0): ConnectionOutcome.Failed {
@@ -449,12 +506,12 @@ class ConnectionCoordinator(
         const val MIN_LOGIN_INTERVAL_SECONDS = 3
         const val MIN_LOGIN_INTERVAL_MILLIS = MIN_LOGIN_INTERVAL_SECONDS * 1_000L
         const val KEEP_ALIVE_INTERVAL_MILLIS = 60_000L
-        const val CLIENT_IP_ONLINE_RETRY_STEP_MILLIS = 10_000L
-        const val MAX_CLIENT_IP_ONLINE_RETRIES = 6
+        const val MAX_LOGINS_PER_CARRIER = 2
+        const val MAX_LOGINS_PER_ROUND = 4
+        const val MAX_FAILED_ACCOUNTS_PER_BATCH = 3
         const val MAX_RATE_LIMIT_RETRIES = 2
-        const val RECOVERY_COOLDOWN_MILLIS = 60_000L
-        const val CONNECTIVITY_PROBE_ATTEMPTS = 5
-        const val STATUS_CONFIRM_ATTEMPTS = 3
+        const val RECOVERY_COOLDOWN_MILLIS = 15_000L
+        const val STATUS_CONFIRM_ATTEMPTS = 6
         const val STATUS_CONFIRM_DELAY_MILLIS = 1_000L
     }
 }

@@ -1,6 +1,7 @@
 package top.onering.easyconnecter.network
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -27,6 +28,8 @@ import top.onering.easyconnecter.model.Campus
 import top.onering.easyconnecter.model.Carrier
 import top.onering.easyconnecter.model.LoginOutcome
 import java.io.IOException
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
@@ -288,41 +291,39 @@ class DrcomClientTest {
     }
 
     @Test
-    fun httpsProbeFallsBackToIndependentHostAfterNetworkFailure() = runTest {
-        val hosts = mutableListOf<String>()
+    fun httpsProbeAcceptsIndependentHostWhenTheOtherFails() = runBlocking {
+        val hosts = Collections.synchronizedList(mutableListOf<String>())
         val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
             hosts.add(chain.request().url.host)
-            if (hosts.size == 1) throw IOException("First probe unavailable")
+            if (chain.request().url.host == "www.baidu.com") throw IOException("First probe unavailable")
             probeResponse(chain.request(), 200)
         }.build()
 
         assertTrue(HttpsConnectivityProbe(httpClient).ping())
-        assertEquals(listOf("www.baidu.com", "www.qq.com"), hosts)
+        assertTrue(hosts.contains("www.qq.com"))
     }
 
     @Test
-    fun httpsProbeRejectsRedirectsHttpErrorsAndMissingTls() = runTest {
+    fun httpsProbeRejectsRedirectsHttpErrorsAndMissingTls() = runBlocking {
         for ((code, tls) in listOf(302 to true, 503 to true, 200 to false)) {
-            val hosts = mutableListOf<String>()
+            val hosts = Collections.synchronizedList(mutableListOf<String>())
             val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
                 hosts.add(chain.request().url.host)
                 probeResponse(chain.request(), code, tls)
             }.build()
             assertFalse(HttpsConnectivityProbe(httpClient).ping())
-            assertEquals(listOf("www.baidu.com", "www.qq.com"), hosts)
+            assertEquals(setOf("www.baidu.com", "www.qq.com"), hosts.toSet())
         }
     }
 
     @Test
-    fun cancellingHttpsProbeDoesNotStartTheFallbackRequest() = runBlocking {
-        val entered = CountDownLatch(1)
+    fun cancellingHttpsProbeCancelsBothParallelRequests() = runBlocking {
+        val entered = CountDownLatch(2)
         val release = CountDownLatch(1)
-        val finished = CountDownLatch(1)
-        val capturedCall = AtomicReference<Call>()
-        val hosts = mutableListOf<String>()
+        val finished = CountDownLatch(2)
+        val calls = ConcurrentHashMap.newKeySet<Call>()
         val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
-            capturedCall.set(chain.call())
-            hosts.add(chain.request().url.host)
+            calls.add(chain.call())
             entered.countDown()
             check(release.await(5, TimeUnit.SECONDS))
             try {
@@ -335,13 +336,60 @@ class DrcomClientTest {
         try {
             assertTrue(entered.await(5, TimeUnit.SECONDS))
             withTimeout(2_000) { job.cancelAndJoin() }
-            assertTrue(capturedCall.get().isCanceled())
+            assertEquals(2, calls.size)
+            assertTrue(calls.all { it.isCanceled() })
         } finally {
             release.countDown()
         }
         assertTrue(finished.await(5, TimeUnit.SECONDS))
-        assertEquals(listOf("www.baidu.com"), hosts)
         assertTrue(job.isCancelled)
+    }
+
+    @Test
+    fun slowProbeDoesNotDelayHealthyOtherHost() = runBlocking {
+        val entered = CountDownLatch(2)
+        val releaseSlowProbe = CountDownLatch(1)
+        val slowCall = AtomicReference<Call>()
+        val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
+            if (chain.request().url.host == "www.baidu.com") slowCall.set(chain.call())
+            entered.countDown()
+            check(entered.await(5, TimeUnit.SECONDS))
+            if (chain.request().url.host == "www.baidu.com") {
+                check(releaseSlowProbe.await(5, TimeUnit.SECONDS))
+                throw IOException("Slow host released")
+            }
+            probeResponse(chain.request(), 200)
+        }.build()
+        try {
+            assertTrue(withTimeout(2_000) { HttpsConnectivityProbe(httpClient).ping() })
+            assertTrue(slowCall.get().isCanceled())
+        } finally {
+            releaseSlowProbe.countDown()
+        }
+    }
+
+    @Test
+    fun probeTotalDeadlineCancelsAllOutstandingRequests() = runBlocking {
+        val entered = CountDownLatch(2)
+        val release = CountDownLatch(1)
+        val calls = ConcurrentHashMap.newKeySet<Call>()
+        val httpClient = OkHttpClient.Builder().addInterceptor { chain ->
+            calls.add(chain.call())
+            entered.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            throw IOException("Released")
+        }.build()
+        val result = async(Dispatchers.Default) {
+            HttpsConnectivityProbe(httpClient, timeoutMillis = 500).ping()
+        }
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertFalse(withTimeout(2_000) { result.await() })
+            assertEquals(2, calls.size)
+            assertTrue(calls.all { it.isCanceled() })
+        } finally {
+            release.countDown()
+        }
     }
 
     private fun testClient(httpClient: OkHttpClient) = DrcomClient(

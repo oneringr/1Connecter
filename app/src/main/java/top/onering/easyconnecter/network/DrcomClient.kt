@@ -4,8 +4,12 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl
@@ -39,7 +43,8 @@ internal class HttpsConnectivityProbe(
     private val urls: List<HttpUrl> = listOf(
         "https://www.baidu.com/".toHttpUrl(),
         "https://www.qq.com/".toHttpUrl()
-    )
+    ),
+    private val timeoutMillis: Long = 3_000
 ) : ConnectivityProbe {
     private val probeClient = client.newBuilder()
         .followRedirects(false)
@@ -55,19 +60,32 @@ internal class HttpsConnectivityProbe(
     }
 
     override suspend fun ping(): Boolean {
-        for (url in urls) {
-            val reachable = try {
-                probeClient.executeCancellable(Request.Builder().url(url).build()) { response ->
-                    response.isSuccessful && response.handshake != null && response.request.url.isHttps
+        return withTimeoutOrNull(timeoutMillis) {
+            coroutineScope {
+                val results = Channel<Boolean>(urls.size)
+                val probes = urls.map { url ->
+                    launch {
+                        val reachable = try {
+                            probeClient.executeCancellable(Request.Builder().url(url).build()) { response ->
+                                response.isSuccessful && response.handshake != null && response.request.url.isHttps
+                            }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: IOException) {
+                            false
+                        }
+                        results.send(reachable)
+                    }
                 }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: IOException) {
-                false
+                try {
+                    repeat(urls.size) { if (results.receive()) return@coroutineScope true }
+                    false
+                } finally {
+                    probes.forEach { it.cancel() }
+                    results.close()
+                }
             }
-            if (reachable) return true
-        }
-        return false
+        } ?: false
     }
 }
 

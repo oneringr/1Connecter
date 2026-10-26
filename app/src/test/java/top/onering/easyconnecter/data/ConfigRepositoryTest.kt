@@ -49,7 +49,7 @@ class ConfigRepositoryTest {
         config.recordSuccessfulLogin("one", Carrier.MOBILE)
         val preferencesBefore = temporaryFolder.root.resolve("login_preferences.json").readText()
         val first = PendingRecovery(Campus.CHENGBEI, "one", Carrier.MOBILE)
-        val replacement = PendingRecovery(Campus.ZHONGSHAN, "two", Carrier.TELECOM)
+        val replacement = PendingRecovery(Campus.ZHONGSHAN, "two", Carrier.TELECOM, 2, setOf(Carrier.MOBILE))
 
         config.setPendingRecovery(first)
         assertEquals(first, ConfigRepository(temporaryFolder.root).pendingRecovery())
@@ -79,5 +79,14 @@ class ConfigRepositoryTest {
 
         assertTrue(failed.isFailure)
         assertEquals(first, ConfigRepository(temporaryFolder.root).pendingRecovery())
+    }
+
+    @Test
+    fun migratesLegacyRecoveryAsOneAttemptAndRejectsInvalidProgress() = runTest {
+        val file = temporaryFolder.root.resolve("pending_recovery.json")
+        file.writeText("""{"campus":"CHENGBEI","studentId":"one","carrier":"MOBILE"}""")
+        assertEquals(PendingRecovery(Campus.CHENGBEI, "one", Carrier.MOBILE), ConfigRepository(temporaryFolder.root).pendingRecovery())
+        file.writeText("""{"campus":"CHENGBEI","studentId":"one","carrier":"MOBILE","loginAttempts":-1}""")
+        assertTrue(runCatching { ConfigRepository(temporaryFolder.root).pendingRecovery() }.isFailure)
     }
 }

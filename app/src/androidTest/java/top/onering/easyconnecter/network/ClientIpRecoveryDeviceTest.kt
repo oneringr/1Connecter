@@ -163,7 +163,8 @@ class ClientIpRecoveryDeviceTest {
                     }
                     assertTrue("Real offline confirmation must follow actual logout", offline > logout)
                     assertTrue("The first recovery login must follow real offline confirmation", retryStart > offline)
-                    assertTrue("Recovery must wait a real ten seconds after offline confirmation", steps[retryStart].at - steps[offline].at >= 10_000)
+                    assertTrue("Recovery must respect the three-second interval after logout", steps[retryStart].at - steps[logout].at >= 3_000)
+                    assertTrue("Confirmed offline recovery must not retain the old ten-second backoff", steps[retryStart].at - steps[offline].at < 10_000)
                     gateway.logins.zipWithNext().forEach { (previous, next) ->
                         val rateLimit = previous.outcome as? LoginOutcome.RateLimited
                         if (rateLimit != null) {
@@ -199,10 +200,15 @@ class ClientIpRecoveryDeviceTest {
     }
 
     private suspend fun restoreSessionIfNeeded(client: DrcomClient, campus: Campus, account: Account, carrier: Carrier) {
-        val status = client.checkStatus(campus).getOrNull()
-        if (status?.loggedIn == true && status.account == account.studentId && httpsIsReachable()) return
+        var status: SessionStatus? = null
+        for (attempt in 0 until 6) {
+            if (attempt > 0) delay(1_000)
+            status = client.checkStatus(campus).getOrNull()
+            if (status?.loggedIn == true && status.account == account.studentId && httpsIsReachable()) return
+            if (status?.loggedIn == false) break
+        }
         assertTrue("Cleanup cannot safely restore an unknown or different active campus session", status?.loggedIn == false)
-        delay(10_000)
+        delay(3_000)
         repeat(3) {
             when (val outcome = client.login(account.studentId, account.password, campus, carrier)) {
                 is LoginOutcome.Success -> {
@@ -210,7 +216,7 @@ class ClientIpRecoveryDeviceTest {
                     report("cleanup: original session restored")
                     return
                 }
-                is LoginOutcome.RateLimited -> delay(outcome.waitSeconds.coerceAtLeast(3) * 1_000L)
+                is LoginOutcome.RateLimited -> delay(maxOf(outcome.waitSeconds.toLong() * 1_000L, if (it == 0) 6_000L else 12_000L))
                 is LoginOutcome.ClientIpOnline -> {
                     val latest = client.checkStatus(campus).getOrNull()
                     if (latest?.loggedIn == true && latest.account == account.studentId && httpsIsReachable()) return
@@ -347,6 +353,6 @@ class ClientIpRecoveryDeviceTest {
     }
 
     private companion object {
-        val CONFIG_FILES = listOf("accounts.json", "current_index.txt", "campus_config.txt", "keep_alive_config.txt", "login_preferences.json")
+        val CONFIG_FILES = listOf("accounts.json", "current_index.txt", "campus_config.txt", "keep_alive_config.txt", "login_preferences.json", "pending_recovery.json")
     }
 }

@@ -66,7 +66,7 @@ class ConfigRepositoryDeviceTest {
         }
         try {
             val first = PendingRecovery(Campus.CHENGBEI, "synthetic-account-A", Carrier.TELECOM)
-            val second = PendingRecovery(Campus.ZHONGSHAN, "synthetic-account-B", Carrier.MOBILE)
+            val second = PendingRecovery(Campus.ZHONGSHAN, "synthetic-account-B", Carrier.MOBILE, 2, setOf(Carrier.TELECOM))
             val initialRepository = ConfigRepository(isolatedContext)
             initialRepository.setKeepAlive(true)
             initialRepository.setPendingRecovery(first)
